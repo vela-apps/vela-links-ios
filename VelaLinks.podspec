@@ -10,7 +10,7 @@ Pod::Spec.new do |s|
   s.homepage         = 'https://deeplinks.velaapps.in'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
   s.author           = { 'Vela Apps' => 'info@velaapps.in' }
-  s.source           = { :git => 'https://github.com/velaapps/vela-links-ios.git', :tag => s.version.to_s }
+  s.source           = { :git => 'https://github.com/vela-apps/vela-links-ios.git', :tag => s.version.to_s }
   s.ios.deployment_target = '13.0'
   s.swift_versions   = ['5.9', '5.10']
   s.source_files     = 'Sources/VelaLinks/**/*.swift'

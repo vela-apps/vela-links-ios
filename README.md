@@ -14,7 +14,7 @@ and **Verify setup** checks them.
 
 **2. Install.** In Xcode: File > Add Package Dependencies, and enter the repository address of this package. Or in `Package.swift`:
 ```swift
-.package(url: "https://github.com/velaapps/vela-links-ios.git", from: "1.0.0")
+.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.0.0")
 ```
 CocoaPods: `pod 'VelaLinks', '~> 1.0'`.
 
