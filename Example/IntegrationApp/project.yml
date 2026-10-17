@@ -1,0 +1,43 @@
+# Generate the Xcode project with: xcodegen generate   (the .xcodeproj is not committed)
+# Real values are passed on the build command line, for example:
+#   xcodebuild ... VL_API_KEY=vl_xxx VL_BASE_URL=http://localhost:8000 VL_SLUG=iosdemo
+name: IntegrationApp
+options:
+  bundleIdPrefix: in.velaapps.links
+  deploymentTarget:
+    iOS: "15.0"
+packages:
+  VelaLinks:
+    path: ../..
+targets:
+  IntegrationApp:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    dependencies:
+      - package: VelaLinks
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: in.velaapps.links.integration
+        MARKETING_VERSION: "3.4.5"
+        CURRENT_PROJECT_VERSION: "7"
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.9"
+        VL_API_KEY: "vl_..."
+        VL_BASE_URL: "http://localhost:8000"
+        VL_SLUG: "iosdemo"
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Vela Links Integration
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        CFBundleURLTypes:
+          - CFBundleURLName: in.velaapps.links.integration
+            CFBundleURLSchemes: [velademo]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        VLApiKey: $(VL_API_KEY)
+        VLBaseUrl: $(VL_BASE_URL)
+        VLSlug: $(VL_SLUG)
