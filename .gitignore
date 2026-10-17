@@ -4,3 +4,6 @@
 xcuserdata/
 DerivedData/
 .DS_Store
+Example/IntegrationApp/*.xcodeproj
+Example/IntegrationApp/Info.plist
+

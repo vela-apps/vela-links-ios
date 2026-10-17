@@ -170,7 +170,9 @@ opens still resolve and are counted unless you pass `reportOpens: false`. `autoT
   ignored. Without one, each install is its own anonymous person.
 - **Deferred links and the paste notice:** on the first launch after install the SDK reads the clipboard once per try, looking for
   the `vlink:` token the link page copied. It asks `hasStrings` first, so a clipboard without text is never read. iOS may show its
-  "pasted from" notice. It makes at most 3 tries and stops after the first success.
+  "pasted from" notice, and from iOS 16 a system question "Allow Paste" when the text was copied in another app (the SDK reads
+  it away from the main thread, so your UI keeps running while the question is open). If the person taps "Don't Allow Paste", no
+  token is sent and the service can still match by network fingerprint. It makes at most 3 tries and stops after the first success.
 - **Adding the SDK to an app that is already installed:** the first-launch check also runs once for people who update. Pass
   `matchDeferred: false` in that release and turn it on in the next one. Updating installs do not report `first_open`.
 - **Errors:** every network step has a time limit (`requestTimeout`, 10 seconds). Explicit calls such as `createLink` throw
@@ -178,8 +180,8 @@ opens still resolve and are counted unless you pass `reportOpens: false`. `autoT
   only for `localhost`), and redirects are never followed.
 - **Threads:** all calls are safe from any thread. Tracking is held in memory behind a short lock and saved on a background queue.
   `onLink` closures run on the main thread.
-- **Background time:** events are sent when the app moves to the background; iOS may suspend the app before a slow request ends, in
-  which case the batch is kept and sent next time.
+- **Background time:** when the app moves to the background the SDK asks iOS for extra running time (`beginBackgroundTask`, ended on
+  every path) so the final send is not cut off. If iOS still runs out of patience, the batch is kept and sent next time.
 
 ## Privacy: what the SDK sends and stores
 **Sent to the Vela Links service, over https**

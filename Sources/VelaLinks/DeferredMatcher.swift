@@ -23,14 +23,20 @@ final class ClipboardInstallSource: InstallSource, @unchecked Sendable {
 
     func readToken() async -> String? {
         #if canImport(UIKit) && !os(watchOS)
-        return await MainActor.run { () -> String? in
-            let board = UIPasteboard.general
-            guard board.hasStrings else { return nil }
-            guard let text = board.string, text.hasPrefix(DeferredMatcher.iosPrefix) else { return nil }
-            self.lock.lock()
-            self.changeCountAtRead = board.changeCount
-            self.lock.unlock()
-            return text
+        // Read away from the main thread: from iOS 16 reading text copied in another app shows a system "Allow Paste" question,
+        // and the reading thread waits for the answer. On the main thread that would freeze the whole app.
+        return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let board = UIPasteboard.general
+                guard board.hasStrings, let text = board.string, text.hasPrefix(DeferredMatcher.iosPrefix) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                self.lock.lock()
+                self.changeCountAtRead = board.changeCount
+                self.lock.unlock()
+                continuation.resume(returning: text)
+            }
         }
         #else
         return nil
@@ -39,14 +45,13 @@ final class ClipboardInstallSource: InstallSource, @unchecked Sendable {
 
     func clearToken(_ token: String) async {
         #if canImport(UIKit) && !os(watchOS)
-        await MainActor.run {
-            self.lock.lock()
-            let seen = self.changeCountAtRead
-            self.changeCountAtRead = nil
-            self.lock.unlock()
-            let board = UIPasteboard.general
-            if let seen = seen, board.changeCount == seen { board.string = "" }
+        let seen: Int? = lock.sync {
+            let value = changeCountAtRead
+            changeCountAtRead = nil
+            return value
         }
+        let board = UIPasteboard.general
+        if let seen = seen, board.changeCount == seen { board.string = "" }
         #endif
     }
 }
