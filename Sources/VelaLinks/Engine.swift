@@ -38,6 +38,7 @@ struct Dependencies {
     var appVersion: String? = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     var flushEvery: TimeInterval = 15
     var flushAt = 20
+    var backgroundTasks: BackgroundTaskRunner? = DefaultBackgroundTasks.make()
 }
 
 private final class ObserverTokens: @unchecked Sendable {
@@ -76,7 +77,7 @@ final class Engine: @unchecked Sendable {
         options.flushEvery = deps.flushEvery
         options.flushAt = deps.flushAt
         tracker = EventTracker(api: api, store: store, platform: "ios", appVersion: deps.appVersion, now: deps.now,
-                               options: options)
+                               options: options, backgroundTasks: deps.backgroundTasks)
         matcher = DeferredMatcher(api: api, store: store, source: deps.installSource ?? ClipboardInstallSource())
         if deps.observeLifecycle { observe() }
     }

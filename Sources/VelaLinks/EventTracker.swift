@@ -39,6 +39,8 @@ final class EventTracker: @unchecked Sendable {
     private let rawVersion: String?
     private let now: () -> Date
     private let options: Options
+    private let backgroundTasks: BackgroundTaskRunner?
+    private var inBackground = false
 
     private let lock = NSLock()
     private let io = DispatchQueue(label: "in.velaapps.links.storage", qos: .utility)
@@ -66,7 +68,8 @@ final class EventTracker: @unchecked Sendable {
     private var inFlightId: String?
 
     init(api: LinksApi, store: VelaLinksStorage, platform: String?, appVersion: String?, now: @escaping () -> Date,
-         options: Options = Options()) {
+         options: Options = Options(), backgroundTasks: BackgroundTaskRunner? = nil) {
+        self.backgroundTasks = backgroundTasks
         self.api = api
         self.store = store
         self.platform = platform
@@ -410,11 +413,14 @@ final class EventTracker: @unchecked Sendable {
     /// waits a few seconds at most, so a bad connection cannot hold up a sign-out.
     private func flushBeforeIdentityChange() async {
         guard locked({ !queue.isEmpty && enabled && iid != nil }) else { return }
+        // in the background the app may be suspended mid-send: ask for time (the hold also ends if the wait times out)
+        let hold = locked({ inBackground }) ? backgroundTasks.map { BackgroundTaskHold(runner: $0, name: "VelaLinks identity flush") } : nil
         await Timeout.run(after: options.identityFlushTimeout) {
             // a send that is already running finishes first, so nothing waiting is left behind
             while self.locked({ self.flushing }) { try? await Task.sleep(nanoseconds: 20_000_000) }
             await self.flush(force: true)
         }
+        hold?.release()
     }
 
     /// Forgets this install: what is waiting is sent first (a few seconds at most), then a new random id is made and the saved
@@ -445,14 +451,22 @@ final class EventTracker: @unchecked Sendable {
 
     /// The app went to the background: remember when, and send what is waiting (ignoring any back-off).
     func appDidEnterBackground() {
+        locked { inBackground = true }
         guard isEnabled else { return }
         let ms = Int((now().timeIntervalSince1970 * 1000).rounded(.down))
         persist { try $0.setInt(ms, forKey: StorageKeys.lastActive) }
-        Task { await self.flush(force: true) }
+        // the task must start now, while the app is still running; the send then finishes under its protection
+        let hold = backgroundTasks.map { BackgroundTaskHold(runner: $0, name: "VelaLinks flush") }
+        Task {
+            await self.flush(force: true)
+            self.drainStorage()
+            hold?.release()
+        }
     }
 
     /// The app came back: a visit after a long absence is a new session.
     func appWillEnterForeground() {
+        locked { inBackground = false }
         guard isEnabled, options.autoTrack else { return }
         automaticEvents()
     }

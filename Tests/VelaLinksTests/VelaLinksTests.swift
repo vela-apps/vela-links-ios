@@ -22,6 +22,7 @@ final class VelaLinksTests: XCTestCase {
         d.notificationCenter = center
         d.observeLifecycle = observe
         d.appVersion = "1.2.3"
+        d.backgroundTasks = nil
         d.flushEvery = 3600
         return d
     }
