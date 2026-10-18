@@ -15,11 +15,11 @@ and **Verify setup** checks them. Save both the iOS bundle id and the Apple Team
 
 **2. Install.** In Xcode: File > Add Package Dependencies, and enter the repository address of this package. Or in `Package.swift`:
 ```swift
-.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.0.1")
+.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.0.2")
 ```
 CocoaPods:
 ```ruby
-pod 'VelaLinks', :git => 'https://github.com/vela-apps/vela-links-ios.git', :tag => '1.0.1'
+pod 'VelaLinks', :git => 'https://github.com/vela-apps/vela-links-ios.git', :tag => '1.0.2'
 ```
 
 **3. Start it** as early as you can (the app's `init` or `application(_:didFinishLaunchingWithOptions:)`):
@@ -53,6 +53,7 @@ If a link arrives before you listen, read it once with `VelaLinks.shared.consume
 ```swift
 let url = try await VelaLinks.shared.createLink(route: "/invite", params: ["id": "42"], title: "Join me")
 ```
+Param values are text, numbers or booleans; nested arrays and dictionaries are refused by the service.
 
 **6. See how people use your app.**
 ```swift
@@ -194,10 +195,9 @@ launch, and when the app was closed before it could be saved.
   it away from the main thread, so your UI keeps running while the question is open). If the person taps "Don't Allow Paste", no
   token is sent and the service can still match by network fingerprint. It makes at most 3 tries and stops after the first success.
 - **Adding the SDK to an app that is already installed:** the first-launch check also runs once for people who update. Pass
-  `matchDeferred: false` in that release and turn it on in the next one. A person who updates from a build without the SDK also
-  reports `first_open` and `session_start` once, because the SDK cannot tell an update from a new install. If you do not want updates
-  counted as new installs, pass `autoTrack: false` for that release and send your own events with `track`; turning `autoTrack` on
-  later reports one `first_open` for everyone who has not sent one yet.
+  `matchDeferred: false` in that release and turn it on in the next one. `first_open` cannot tell an existing install from a new
+  one: anyone who updates to the first release that contains the SDK (or from an older SDK version that had not yet reported it)
+  sends `first_open` and `session_start` once, so the dashboard's new-installs figure rises for that release.
 - **Errors:** every network step has a time limit (`requestTimeout`, 10 seconds). Explicit calls such as `createLink` throw
   `VelaLinksError`; background work never throws and never stops your app starting. `baseUrl` must be `https://` (plain `http://`
   only for `localhost`), and redirects are never followed.
@@ -205,7 +205,9 @@ launch, and when the app was closed before it could be saved.
   `onLink` closures run on the main thread.
 - **Background time:** when the app moves to the background the SDK asks iOS for extra running time (`beginBackgroundTask`, ended on
   every path) so the final send is not cut off. If iOS still runs out of patience, the batch is kept and sent next time. The package
-  also compiles into app extensions; there it asks for no extra time.
+  also compiles into app extensions; there it asks for no extra time. An extension has its own bundle id and its own
+  `UserDefaults`, so it must pass `appId:` (the parent app's bundle id) to `configure`, and, if it should share the install id and
+  state with the app, a shared `userDefaults:` suite (for example `UserDefaults(suiteName: "group.your.app")`).
 
 ## Privacy: what the SDK sends and stores
 **Sent to the Vela Links service, over https**

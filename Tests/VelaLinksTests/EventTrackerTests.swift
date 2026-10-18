@@ -559,6 +559,18 @@ final class EventTrackerTests: XCTestCase {
         XCTAssertTrue(saved.contains("\"event_200\""))
     }
 
+    func testAScreenShownWhileTrackingWasOffIsReportedAfterTrackingIsTurnedOn() async throws {
+        let server = EventServer()
+        let t = try tracker(server, autoTrack: false)
+        await t.setEnabled(false)
+        t.trackScreen("Home")
+        await t.setEnabled(true)
+        t.trackScreen("Home")
+        await t.flush()
+        let screens = server.batches.flatMap { events($0).compactMap { $0["screen"] as? String } }
+        XCTAssertEqual(screens, ["Home"])
+    }
+
     func testTrackScreenReportsTheSameScreenOnceUntilSomethingElseIsShown() async throws {
         let server = EventServer()
         let t = try tracker(server, autoTrack: false)

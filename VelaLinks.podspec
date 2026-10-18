@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'VelaLinks'
-  s.version          = '1.0.1'
+  s.version          = '1.0.2'
   s.summary          = 'Deep links, deferred deep links, short links and in-app analytics for iOS apps.'
   s.description      = <<-DESC
     Opens the right screen from a tapped link, a QR code or a custom scheme (even right after install), creates short share

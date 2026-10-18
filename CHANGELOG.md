@@ -1,3 +1,14 @@
+## 1.0.2
+
+Small fixes and clearer notes.
+
+- Fixed: a screen shown while tracking was switched off (for example before the person agreed) was remembered as already reported,
+  so it was missed after they agreed. It is now reported the next time it is shown after tracking is on.
+- Clearer notes on `createLink`: param values are text, numbers or booleans; the service refuses nested arrays and dictionaries.
+- README: an app extension must pass `appId:` (the parent app's bundle id) and, to share the install id with the app, a shared
+  `userDefaults:` suite. The update note now says plainly that anyone who updates to the first release with the SDK reports
+  `first_open` and `session_start` once, so the new-installs figure rises for that release.
+
 ## 1.0.1
 
 Fixes and a privacy manifest.

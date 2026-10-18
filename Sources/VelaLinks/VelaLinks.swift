@@ -373,10 +373,11 @@ public final class VelaLinks: @unchecked Sendable {
         }
     }
 
-    /// Creates a short link that opens `route` in the app with `params` (values must be writable as JSON) and returns its
-    /// address.
-    /// - Throws: ``VelaLinksError`` when the service cannot be reached or refuses the request, and `.invalidArgument` for an
-    ///   empty route, params that are not JSON, or when `configure` has not been called.
+    /// Creates a short link that opens `route` in the app with `params` and returns its address. Param values are text, numbers
+    /// or booleans (a flat list): the service refuses nested arrays and dictionaries.
+    /// - Throws: ``VelaLinksError`` when the service cannot be reached or refuses the request (for example for a nested param
+    ///   value), and `.invalidArgument` for an empty route, params that cannot be written as JSON, or when `configure` has not
+    ///   been called.
     public func createLink(route: String, params: [String: Any] = [:], title: String? = nil, description: String? = nil,
                            imageUrl: String? = nil, fallbackUrl: String? = nil, campaign: String? = nil,
                            expiresInHours: Int? = nil) async throws -> String {

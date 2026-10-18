@@ -260,6 +260,8 @@ final class EventTracker: @unchecked Sendable {
     /// Records a screen view. The same screen twice in a row is reported once, until another screen is shown.
     func trackScreen(_ name: String, at date: Date? = nil) {
         let repeated: Bool = locked {
+            // while tracking is off nothing is reported, so the screen must not be remembered as "already reported"
+            guard enabled else { return true }
             if name == lastScreen { return true }
             lastScreen = name
             return false
