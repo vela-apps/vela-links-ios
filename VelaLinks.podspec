@@ -1,11 +1,11 @@
 Pod::Spec.new do |s|
   s.name             = 'VelaLinks'
-  s.version          = '1.0.0'
+  s.version          = '1.0.1'
   s.summary          = 'Deep links, deferred deep links, short links and in-app analytics for iOS apps.'
   s.description      = <<-DESC
     Opens the right screen from a tapped link, a QR code or a custom scheme (even right after install), creates short share
     links from inside the app, and reports screens, sign-ups and purchases credited to the link or campaign that brought each
-    person. No third-party dependencies, no advertising id, no device id, no location.
+    person. No third-party dependencies, no advertising id, no hardware identifier, no location.
   DESC
   s.homepage         = 'https://deeplinks.velaapps.in'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
@@ -16,4 +16,5 @@ Pod::Spec.new do |s|
   s.source_files     = 'Sources/VelaLinks/**/*.swift'
   s.frameworks       = 'Foundation', 'UIKit'
   s.weak_frameworks  = 'SwiftUI'
+  s.resource_bundles = { 'VelaLinks' => ['Sources/VelaLinks/PrivacyInfo.xcprivacy'] }
 end

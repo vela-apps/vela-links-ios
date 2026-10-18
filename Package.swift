@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "VelaLinks", targets: ["VelaLinks"]),
     ],
     targets: [
-        .target(name: "VelaLinks"),
+        .target(name: "VelaLinks", resources: [.process("PrivacyInfo.xcprivacy")]),
         .testTarget(name: "VelaLinksTests", dependencies: ["VelaLinks"]),
     ]
 )

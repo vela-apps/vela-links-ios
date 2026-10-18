@@ -61,6 +61,11 @@ enum Check {
         return text.isEmpty ? nil : text
     }
 
+    /// The first `scalars` Unicode scalars of `text` (the service counts characters that way, not as grapheme clusters).
+    static func truncated(_ text: String, scalars: Int) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.prefix(scalars)))
+    }
+
     static func randomHex(_ length: Int) -> String {
         let digits = Array("0123456789abcdef")
         var generator = SystemRandomNumberGenerator()

@@ -80,12 +80,12 @@ final class EventTrackerTests: XCTestCase {
         XCTAssertEqual(server.names.filter { $0 == "session_start" }.count, 2)
     }
 
-    func testAnInstallThatRanAnEarlierVersionDoesNotReportFirstOpen() async throws {
+    func testAnInstallWithTheLinkCheckDoneStillReportsFirstOpenOnce() async throws {
         try store.setBool(true, forKey: StorageKeys.deferredChecked)
         let server = EventServer()
         let t = try tracker(server)
         await t.flush()
-        XCTAssertEqual(server.names, ["session_start"])
+        XCTAssertEqual(server.names, ["first_open", "session_start"])
     }
 
     func testANewInstallReportsFirstOpenAndTheFlagIsStoredAfterTheEventIsSaved() async throws {

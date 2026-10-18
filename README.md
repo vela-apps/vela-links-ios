@@ -10,13 +10,17 @@ yet, and you see which links and campaigns bring people who sign up and pay.
 
 **1. Add your app in the dashboard.** Sign up at [deeplinks.velaapps.in](https://deeplinks.velaapps.in) (there is a free plan), add
 your app (bundle id, Apple Team ID, store links) and copy the SDK key. The **SDK setup** tab shows the exact settings for your app,
-and **Verify setup** checks them.
+and **Verify setup** checks them. Save both the iOS bundle id and the Apple Team ID: the link domain builds its
+`apple-app-site-association` file from them (`<Team ID>.<bundle id>`), so Universal Links do not open your app until both are saved.
 
 **2. Install.** In Xcode: File > Add Package Dependencies, and enter the repository address of this package. Or in `Package.swift`:
 ```swift
-.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.0.0")
+.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.0.1")
 ```
-CocoaPods: `pod 'VelaLinks', '~> 1.0'`.
+CocoaPods:
+```ruby
+pod 'VelaLinks', :git => 'https://github.com/vela-apps/vela-links-ios.git', :tag => '1.0.1'
+```
 
 **3. Start it** as early as you can (the app's `init` or `application(_:didFinishLaunchingWithOptions:)`):
 ```swift
@@ -30,7 +34,8 @@ Task {
     )
 }
 ```
-Calls to `track` and friends made before `configure` has finished are kept in order and run when it finishes. They never crash.
+Calls to `track` and friends made before `configure` has finished are kept in order and run when it finishes. They never crash. A
+link handed to `handle(url:)` before `configure` has finished is kept (the newest one) and resolved as soon as it does.
 
 **4. Send incoming links to the SDK and listen for them.**
 ```swift
@@ -117,7 +122,7 @@ func application(_ application: UIApplication, continue userActivity: NSUserActi
 }
 ```
 `handle` returns `true` when the URL has the shape of a Vela link; it resolves in the background and never blocks. The same address
-handed over twice within 2 seconds counts once. Use `try await VelaLinks.shared.resolve(url:)` instead if you want the resolved link
+handed over twice within 2 seconds counts once. Use `await VelaLinks.shared.resolve(url:)` instead if you want the resolved link
 as a return value.
 
 ### Screens in UIKit
@@ -141,6 +146,16 @@ await VelaLinks.shared.setTrackingEnabled(true)     // also starts first_open an
 `setTrackingEnabled(false)` discards waiting events and stops new ones; the choice is remembered. It stops in-app events only: link
 opens still resolve and are counted unless you pass `reportOpens: false`. `autoTrack: false` turns off only the automatic events.
 
+**Pass `trackEvents` from the person's stored choice on every launch.** A saved opt-in does not override `trackEvents: false`, so an
+app that always passes `false` never collects anything after a restart until it calls `setTrackingEnabled(true)` again. A saved
+opt-out does win over `trackEvents: true`.
+```swift
+let agreed = UserDefaults.standard.bool(forKey: "analyticsConsent")      // your own record of the person's answer
+try await VelaLinks.configure(apiKey: "vl_...", baseUrl: "...", trackEvents: agreed)
+```
+`first_open` is reported once per install, as soon as tracking is on and it has not been sent: also when the person agrees on a later
+launch, and when the app was closed before it could be saved.
+
 ## Reference
 | Call | What it does |
 | --- | --- |
@@ -155,10 +170,15 @@ opens still resolve and are counted unless you pass `reportOpens: false`. `autoT
 | `shared.shutdown()` | Stop listening, send what is waiting, end the streams. |
 
 ## Good to know
-- **The SDK key** identifies your app and can create links and report opens for it, nothing else. It lives in your app like an
-  analytics key, so it is rate-limited, and you can rotate it in the dashboard at any time.
+- **The SDK key** identifies your app. With it the SDK creates links, reports opens, sends in-app events and asks the service to match
+  an install to a link, and it cannot do anything else. It lives in your app like an analytics key, so it is rate-limited, and you can
+  rotate it in the dashboard at any time.
 - **Revenue is client-reported.** Anyone who copies the key out of your app could send fake events, so verify real purchases on your
   own server. The bundle id check only guards against mistakes, because the app sends the id itself.
+- **Debug builds and other bundle ids:** every call that carries the key also carries your app's bundle id (`X-App-Id`). When the
+  dashboard has an iOS bundle id saved, the service answers 401 "This SDK key belongs to a different app" to any other id, for example
+  a debug or beta build with its own bundle id. Events are then kept and retried (nothing is sent) and `createLink` throws. Either save
+  the id in the dashboard, or pass `appId: "your.saved.bundle.id"` to `configure`.
 - **Treat `link.route` and `link.params` as untrusted input,** like any deep link: check the route against the screens you allow, and
   never put secrets in link params.
 - **Event rules:** names use letters, digits and `_` (2 to 40 characters, starting with a letter). Up to 10 properties with short
@@ -174,14 +194,18 @@ opens still resolve and are counted unless you pass `reportOpens: false`. `autoT
   it away from the main thread, so your UI keeps running while the question is open). If the person taps "Don't Allow Paste", no
   token is sent and the service can still match by network fingerprint. It makes at most 3 tries and stops after the first success.
 - **Adding the SDK to an app that is already installed:** the first-launch check also runs once for people who update. Pass
-  `matchDeferred: false` in that release and turn it on in the next one. Updating installs do not report `first_open`.
+  `matchDeferred: false` in that release and turn it on in the next one. A person who updates from a build without the SDK also
+  reports `first_open` and `session_start` once, because the SDK cannot tell an update from a new install. If you do not want updates
+  counted as new installs, pass `autoTrack: false` for that release and send your own events with `track`; turning `autoTrack` on
+  later reports one `first_open` for everyone who has not sent one yet.
 - **Errors:** every network step has a time limit (`requestTimeout`, 10 seconds). Explicit calls such as `createLink` throw
   `VelaLinksError`; background work never throws and never stops your app starting. `baseUrl` must be `https://` (plain `http://`
   only for `localhost`), and redirects are never followed.
 - **Threads:** all calls are safe from any thread. Tracking is held in memory behind a short lock and saved on a background queue.
   `onLink` closures run on the main thread.
 - **Background time:** when the app moves to the background the SDK asks iOS for extra running time (`beginBackgroundTask`, ended on
-  every path) so the final send is not cut off. If iOS still runs out of patience, the batch is kept and sent next time.
+  every path) so the final send is not cut off. If iOS still runs out of patience, the batch is kept and sent next time. The package
+  also compiles into app extensions; there it asks for no extra time.
 
 ## Privacy: what the SDK sends and stores
 **Sent to the Vela Links service, over https**
@@ -197,13 +221,18 @@ opens still resolve and are counted unless you pass `reportOpens: false`. `autoT
   using a one-way hash of the network address (it never stores the address itself). The token is removed from the clipboard once
   used, but only if nothing was copied since.
 
-**Stored on the phone** (`UserDefaults`, keys starting `vela_links.`): the random install id; the events not yet sent (names and
+**Stored on the phone** (`UserDefaults`, keys starting `vela_links.`): the random install id (made and stored on the first launch,
+before any consent and even when tracking is off, but sent only once tracking is on); the events not yet sent (names and
 properties, in plain text, for up to 7 days); the links that brought the install and last opened the app; your user id if you set
 one; the names of once-only events already sent; whether first-open was reported and when the app was last active; whether tracking
 is switched off; and whether the first-launch check finished. iCloud backups can restore these onto a new phone, which would give
 two phones one install id. If that matters to you, pass your own `userDefaults:` suite and keep it out of backups.
 
-**Not used:** no advertising id (IDFA), no device id, no location, no third-party libraries, no method swizzling.
+**Not used:** no advertising id (IDFA), no hardware device id, no location, no third-party libraries, no method swizzling.
+
+**Privacy manifest.** The package ships `PrivacyInfo.xcprivacy`: no tracking and no tracking domains; the `UserDefaults` required-reason
+API (`CA92.1`); and the data types the SDK can send, all linked to the person and used for analytics only: device id (the random
+install id), user id, product interaction, purchase history and other usage data. Xcode merges it into your app's privacy report.
 
 Please describe this in your app's privacy policy, ask for consent where your law requires it, and use it to fill in the App Store
 privacy details.

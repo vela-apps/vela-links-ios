@@ -58,17 +58,45 @@ final class BackgroundTaskHold: @unchecked Sendable {
 
 #if canImport(UIKit) && !os(macOS) && !os(watchOS)
 /// The real thing: `UIApplication.beginBackgroundTask`.
+///
+/// `UIApplication.shared` and its background-task methods are marked unavailable to app extensions, and a package that names them
+/// does not compile into an extension target. So the application object and the two methods are reached by name at run time,
+/// which compiles everywhere and does exactly the same in an app. In an extension there is no application object: no extra time
+/// is requested (the send then runs as usual and is kept for next time if it is cut off).
 final class UIKitBackgroundTaskRunner: BackgroundTaskRunner, @unchecked Sendable {
+    private typealias Begin = @convention(c) (AnyObject, Selector, NSString?, @escaping @convention(block) () -> Void) -> UInt
+    private typealias End = @convention(c) (AnyObject, Selector, UInt) -> Void
+
+    private static let beginSelector = NSSelectorFromString("beginBackgroundTaskWithName:expirationHandler:")
+    private static let endSelector = NSSelectorFromString("endBackgroundTask:")
+
+    /// The running application, or `nil` in an app extension.
+    private static func application() -> AnyObject? {
+        guard !Bundle.main.bundlePath.hasSuffix(".appex"),
+              let type = NSClassFromString("UIApplication") as? NSObject.Type,
+              let shared = type.perform(NSSelectorFromString("sharedApplication")) else { return nil }
+        let app = shared.takeUnretainedValue()
+        return app.responds(to: beginSelector) && app.responds(to: endSelector) ? app : nil
+    }
+
     func begin(name: String, expiration: @escaping @Sendable () -> Void) -> Int? {
         let start: () -> Int? = {
-            let id = UIApplication.shared.beginBackgroundTask(withName: name, expirationHandler: expiration)
-            return id == .invalid ? nil : id.rawValue
+            guard let app = UIKitBackgroundTaskRunner.application(),
+                  let imp = (app as? NSObject)?.method(for: UIKitBackgroundTaskRunner.beginSelector) else { return nil }
+            let call = unsafeBitCast(imp, to: Begin.self)
+            let id = call(app, UIKitBackgroundTaskRunner.beginSelector, name as NSString, { expiration() })
+            // 0 is UIBackgroundTaskIdentifier.invalid
+            return id == 0 ? nil : Int(id)
         }
         return Thread.isMainThread ? start() : DispatchQueue.main.sync(execute: start)
     }
 
     func end(_ token: Int) {
-        let finish = { UIApplication.shared.endBackgroundTask(UIBackgroundTaskIdentifier(rawValue: token)) }
+        let finish = {
+            guard let app = UIKitBackgroundTaskRunner.application(),
+                  let imp = (app as? NSObject)?.method(for: UIKitBackgroundTaskRunner.endSelector) else { return }
+            unsafeBitCast(imp, to: End.self)(app, UIKitBackgroundTaskRunner.endSelector, UInt(token))
+        }
         if Thread.isMainThread { finish() } else { DispatchQueue.main.async(execute: finish) }
     }
 }

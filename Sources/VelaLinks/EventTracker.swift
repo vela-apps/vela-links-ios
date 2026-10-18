@@ -64,8 +64,10 @@ final class EventTracker: @unchecked Sendable {
     private var backoff: TimeInterval = 0
     private var override: Bool?
     private var retryAfter: Date?
-    private var inFlight: [TrackedEvent]?
-    private var inFlightId: String?
+    /// The batch being sent (or waiting to be sent again), exactly as it was built: same events, same id, same envelope.
+    private var inFlight: (events: [TrackedEvent], body: [String: Any])?
+    /// `reset()` was called before `start()`: start then makes a new install id and ignores what was saved.
+    private var resetBeforeStart = false
 
     init(api: LinksApi, store: VelaLinksStorage, platform: String?, appVersion: String?, now: @escaping () -> Date,
          options: Options = Options(), backgroundTasks: BackgroundTaskRunner? = nil) {
@@ -111,18 +113,25 @@ final class EventTracker: @unchecked Sendable {
         }
         guard first else { return }
         do {
+            let wasReset = locked { resetBeforeStart }
             let optedOut = try store.bool(forKey: StorageKeys.optedOut) ?? false
-            var existing = try store.string(forKey: StorageKeys.iid)
+            var existing: String? = wasReset ? nil : try store.string(forKey: StorageKeys.iid)
+            if wasReset {
+                persist { store in
+                    for key in [StorageKeys.firstLink, StorageKeys.lastLink, StorageKeys.queue, StorageKeys.userId,
+                                StorageKeys.onceDone] { try store.remove(forKey: key) }
+                }
+            }
             if existing == nil {
                 let fresh = Check.randomHex(32)
                 existing = fresh
                 persist { try $0.setString(fresh, forKey: StorageKeys.iid) }
             }
-            let first = try store.string(forKey: StorageKeys.firstLink)
-            let last = try store.string(forKey: StorageKeys.lastLink)
-            let user = try store.string(forKey: StorageKeys.userId)
-            let onceKeys = try store.strings(forKey: StorageKeys.onceDone) ?? []
-            let restored = try restoreQueue()
+            let first: String? = wasReset ? nil : try store.string(forKey: StorageKeys.firstLink)
+            let last: String? = wasReset ? nil : try store.string(forKey: StorageKeys.lastLink)
+            let user: String? = wasReset ? nil : try store.string(forKey: StorageKeys.userId)
+            let onceKeys: [String] = wasReset ? [] : try store.strings(forKey: StorageKeys.onceDone) ?? []
+            let restored: [TrackedEvent] = wasReset ? [] : try restoreQueue()
             locked {
                 enabled = enabled && !optedOut
                 if let choice = override {
@@ -130,12 +139,16 @@ final class EventTracker: @unchecked Sendable {
                     persist { try $0.setBool(!choice, forKey: StorageKeys.optedOut) }
                 }
                 iid = existing
+                resetBeforeStart = false
                 firstLink = first
                 lastLink = last
                 uid = user
                 // entries saved by 0.2.0 of the sister SDKs are plain names: they belong to the anonymous person
                 for key in onceKeys { onceDone.insert(key.contains("|") ? key : "|" + key) }
-                queue.insert(contentsOf: restored, at: 0)
+                // events tracked before start() were also saved: do not queue those twice
+                let alreadyQueued = Set(queue.compactMap { $0.id })
+                queue.insert(contentsOf: restored.filter { event in event.id.map { !alreadyQueued.contains($0) } ?? true },
+                             at: 0)
                 version = Check.cleanVersion(rawVersion)
             }
         } catch {
@@ -162,17 +175,17 @@ final class EventTracker: @unchecked Sendable {
         let moment = now()
         do {
             if !(try store.bool(forKey: StorageKeys.firstOpenSent) ?? false) {
-                if try store.contains(StorageKeys.deferredChecked) {
-                    // this install already ran an earlier version of the SDK: it is not new
-                    persist { try $0.setBool(true, forKey: StorageKeys.firstOpenSent) }
-                } else {
-                    track(EventNames.firstOpen)
-                    // remembered only once the event is safely saved, so an app killed in between still reports it next time
-                    let snapshot = locked { queue }
-                    io.async { [store] in
-                        try? store.setString(EventTracker.encode(snapshot), forKey: StorageKeys.queue)
-                        try? store.setBool(true, forKey: StorageKeys.firstOpenSent)
-                    }
+                // Sent once per install, whenever tracking is on: whatever else this install has done (a link check, an earlier
+                // launch without consent) does not matter. An event saved before an app kill that never got its flag is still
+                // in the restored queue, so it is not queued a second time; and it is marked `once`, so the service keeps one.
+                if !locked({ queue.contains { $0.name == EventNames.firstOpen } }) {
+                    track(EventNames.firstOpen, once: true)
+                }
+                // remembered only once the event is safely saved, so an app killed in between still reports it next time
+                let snapshot = locked { queue }
+                io.async { [store] in
+                    try? store.setString(EventTracker.encode(snapshot), forKey: StorageKeys.queue)
+                    try? store.setBool(true, forKey: StorageKeys.firstOpenSent)
                 }
             }
             let last = try store.int(forKey: StorageKeys.lastActive)
@@ -202,14 +215,17 @@ final class EventTracker: @unchecked Sendable {
             guard enabled else { return .nothing }
             guard let event = TrackedEvent.tryCreate(name, at: moment, screen: screen, properties: properties, value: value,
                                                      currency: currency, id: Check.randomHex(24), once: once,
-                                                     orderId: orderId) else {
+                                                     orderId: orderId, identity: currentIdentityLocked()) else {
                 #if DEBUG
                 print("VelaLinks: event \"\(name)\" was ignored (check the name, amount and currency)")
                 #endif
                 return .nothing
             }
             let onceKey = "\(uid ?? "")|\(name)"
-            if once && onceDone.contains(onceKey) { return .nothing }
+            // first_open is `once` on the wire, but kept out of this saved set: it has its own flag, and a set entry written
+            // before the event itself was saved could lose it for good if the app were killed in between
+            let remembered = once && name != EventNames.firstOpen
+            if remembered && onceDone.contains(onceKey) { return .nothing }
             let key = EventKey(name: name, screen: event.screen, properties: event.properties, value: value,
                                currency: currency, orderId: orderId)
             if !once, key == lastEventKey, let last = lastEventAt, moment.timeIntervalSince(last) < EventTracker.sameEvent {
@@ -217,7 +233,7 @@ final class EventTracker: @unchecked Sendable {
             }
             lastEventKey = key
             lastEventAt = moment
-            if once {
+            if remembered {
                 onceDone.insert(onceKey)
                 let keys = Array(onceDone)
                 persist { try $0.setStrings(keys, forKey: StorageKeys.onceDone) }
@@ -234,6 +250,11 @@ final class EventTracker: @unchecked Sendable {
             return .nothing
         }
         if after == .flushNow { Task { await self.flush() } }
+    }
+
+    /// Who an event tracked right now belongs to (`nil` before the install id exists).
+    private func currentIdentityLocked() -> EventIdentity? {
+        iid.map { EventIdentity(iid: $0, uid: uid) }
     }
 
     /// Records a screen view. The same screen twice in a row is reported once, until another screen is shown.
@@ -280,6 +301,10 @@ final class EventTracker: @unchecked Sendable {
     /// Sends what is waiting, now. Safe to call at any time; it never throws. After a failed send, calls that only come from new
     /// events wait for the back-off to pass; `force` (used when the app goes to the background) tries anyway.
     func flush(force: Bool = false) async {
+        if force {
+            // a send that is already running finishes first, so nothing waiting is left behind and two sends never overlap
+            while locked({ flushing }) { try? await Task.sleep(nanoseconds: 20_000_000) }
+        }
         let go: Bool = locked {
             guard !flushing, enabled, !queue.isEmpty, iid != nil else { return false }
             if !force, let wait = retryAfter, now() < wait {
@@ -293,8 +318,7 @@ final class EventTracker: @unchecked Sendable {
         while true {
             let next: (batch: [TrackedEvent], body: [String: Any])? = locked {
                 guard !queue.isEmpty, enabled else { return nil }
-                let (batch, bid) = nextBatchLocked()
-                return (batch, envelopeLocked(batch, bid))
+                return nextBatchLocked()
             }
             guard let current = next else { break }
             let result = await api.sendEvents(current.body)
@@ -307,7 +331,6 @@ final class EventTracker: @unchecked Sendable {
                 backoff = 0
                 retryAfter = nil
                 inFlight = nil
-                inFlightId = nil
                 // sent, or refused for good: either way these exact events are done with (the queue may have changed meanwhile)
                 queue.removeAll { queued in current.batch.contains { $0 === queued } }
                 return false
@@ -321,23 +344,29 @@ final class EventTracker: @unchecked Sendable {
         }
     }
 
-    /// The events to send next. A batch that failed is sent again as it was, with the same id, so the service can tell it has
-    /// already stored it if the first attempt got through but the answer was lost.
-    private func nextBatchLocked() -> ([TrackedEvent], String) {
-        if let again = inFlight, let id = inFlightId,
-           again.allSatisfy({ event in queue.contains { $0 === event } }) {
-            return (again, id)
+    /// The events to send next, with the body to send. A batch that failed is sent again exactly as it was (same events, same id,
+    /// same identity and links), so the service can tell it has already stored it if the first attempt got through but the answer
+    /// was lost. A new batch holds the oldest run of events that belong to one identity, so nothing goes out under another
+    /// person's id.
+    private func nextBatchLocked() -> (batch: [TrackedEvent], body: [String: Any])? {
+        if let again = inFlight, again.events.allSatisfy({ event in queue.contains { $0 === event } }) {
+            return (again.events, again.body)
         }
-        let batch = Array(queue.prefix(EventTracker.maxBatch))
-        let id = Check.randomHex(24)
-        inFlight = batch
-        inFlightId = id
-        return (batch, id)
+        guard let head = queue.first, let owner = head.identity ?? currentIdentityLocked() else { return nil }
+        var batch: [TrackedEvent] = []
+        for event in queue {
+            // an event saved by an earlier version has no owner: it goes with the current identity
+            guard batch.count < EventTracker.maxBatch, (event.identity ?? owner) == owner else { break }
+            batch.append(event)
+        }
+        let body = envelopeLocked(batch, Check.randomHex(24), owner)
+        inFlight = (batch, body)
+        return (batch, body)
     }
 
-    private func envelopeLocked(_ batch: [TrackedEvent], _ bid: String) -> [String: Any] {
-        var out: [String: Any] = ["iid": iid ?? "", "bid": bid, "events": batch.map { $0.toJSON() }]
-        if let uid = uid { out["uid"] = uid }
+    private func envelopeLocked(_ batch: [TrackedEvent], _ bid: String, _ owner: EventIdentity) -> [String: Any] {
+        var out: [String: Any] = ["iid": owner.iid, "bid": bid, "events": batch.map { $0.toJSON() }]
+        if let uid = owner.uid { out["uid"] = uid }
         if let platform = platform { out["platform"] = platform }
         if let version = version { out["app_version"] = version }
         if let firstLink = firstLink { out["first_link"] = firstLink }
@@ -348,7 +377,7 @@ final class EventTracker: @unchecked Sendable {
     // MARK: Saving
 
     private static func encode(_ events: [TrackedEvent]) -> String {
-        let list = events.map { $0.toJSON() }
+        let list = events.map { $0.toStoredJSON() }
         guard JSONSerialization.isValidJSONObject(list), let data = try? JSONSerialization.data(withJSONObject: list)
         else { return "[]" }
         return String(decoding: data, as: UTF8.self)
@@ -361,7 +390,7 @@ final class EventTracker: @unchecked Sendable {
     }
 
     /// Runs a storage step on the background queue without ever letting a storage error reach the app.
-    private func persist(_ step: @escaping (VelaLinksStorage) throws -> Void) {
+    private func persist(_ step: @escaping @Sendable (VelaLinksStorage) throws -> Void) {
         io.async { [store] in try? step(store) }
     }
 
@@ -379,7 +408,6 @@ final class EventTracker: @unchecked Sendable {
             if !value {
                 queue.removeAll()
                 inFlight = nil
-                inFlightId = nil
                 cancelTimerLocked()
                 saveLocked()
             }
@@ -416,9 +444,7 @@ final class EventTracker: @unchecked Sendable {
         // in the background the app may be suspended mid-send: ask for time (the hold also ends if the wait times out)
         let hold = locked({ inBackground }) ? backgroundTasks.map { BackgroundTaskHold(runner: $0, name: "VelaLinks identity flush") } : nil
         await Timeout.run(after: options.identityFlushTimeout) {
-            // a send that is already running finishes first, so nothing waiting is left behind
-            while self.locked({ self.flushing }) { try? await Task.sleep(nanoseconds: 20_000_000) }
-            await self.flush(force: true)
+            await self.flush(force: true) // waits for a send that is already running
         }
         hold?.release()
     }
@@ -430,13 +456,16 @@ final class EventTracker: @unchecked Sendable {
         locked {
             queue.removeAll()
             inFlight = nil
-            inFlightId = nil
             firstLink = nil
             lastLink = nil
             uid = nil
             lastScreen = nil
             onceDone.removeAll()
-            guard started, !storageFailed else { return }
+            guard started else {
+                resetBeforeStart = true // start() makes the new install id and ignores what was saved
+                return
+            }
+            guard !storageFailed else { return }
             persist { store in
                 for key in [StorageKeys.firstLink, StorageKeys.lastLink, StorageKeys.queue, StorageKeys.userId,
                             StorageKeys.onceDone] { try store.remove(forKey: key) }

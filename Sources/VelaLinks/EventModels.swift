@@ -16,7 +16,7 @@ enum JSONScalar: Hashable {
             guard let wrapped = mirror.children.first?.value else { return .null }
             return from(wrapped)
         }
-        if let text = any as? String { return .string(String(text.prefix(100))) }
+        if let text = any as? String { return .string(Check.truncated(text, scalars: 100)) }
         if let number = any as? NSNumber {
             #if canImport(Darwin)
             if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
@@ -46,6 +46,13 @@ enum JSONScalar: Hashable {
     }
 }
 
+/// Who an event belongs to: the install id and the signed-in user id in force when it was tracked. Kept with the event (and saved
+/// with it) so that a later sign-in or sign-out can never move it to another person. It is not part of the event sent to the service.
+struct EventIdentity: Equatable, Sendable {
+    let iid: String
+    let uid: String?
+}
+
 /// One thing that happened in the app, waiting to be sent. Immutable, and compared by identity when it leaves the queue.
 final class TrackedEvent: @unchecked Sendable {
     let name: String
@@ -57,9 +64,12 @@ final class TrackedEvent: @unchecked Sendable {
     let id: String?
     let once: Bool
     let orderId: String?
+    /// Who this event belongs to; `nil` for an event saved by an earlier version (it then goes out under the current identity).
+    let identity: EventIdentity?
 
     private init(name: String, at: Date, screen: String?, properties: [String: JSONScalar]?, value: Double?,
-                 currency: String?, id: String?, once: Bool, orderId: String?) {
+                 currency: String?, id: String?, once: Bool, orderId: String?, identity: EventIdentity?) {
+        self.identity = identity
         self.name = name
         self.at = at
         self.screen = screen
@@ -75,17 +85,22 @@ final class TrackedEvent: @unchecked Sendable {
     /// that is not three letters. Tracking never throws into the app, so an unusable event is simply dropped.
     static func tryCreate(_ name: String, at: Date, screen: String? = nil, properties: [String: Any]? = nil,
                           value: Double? = nil, currency: String? = nil, id: String? = nil, once: Bool = false,
-                          orderId: String? = nil) -> TrackedEvent? {
+                          orderId: String? = nil, identity: EventIdentity? = nil) -> TrackedEvent? {
         guard Check.eventName(name) else { return nil }
-        if let value = value, !value.isFinite || value < 0 { return nil }
+        // the service refuses amounts above a billion, which would lose the whole event
+        if let value = value, !value.isFinite || value < 0 || value > maxValue { return nil }
         if let currency = currency, !Check.currency(currency) { return nil }
         // an order id the service would not accept is left off: the purchase itself is kept
         let order = orderId.flatMap { Check.orderId($0) ? $0 : nil }
-        let shortScreen = screen.flatMap { $0.isEmpty ? nil : String($0.prefix(100)) }
+        let shortScreen = screen.flatMap { $0.isEmpty ? nil : Check.truncated($0, scalars: 100) }
         return TrackedEvent(name: name, at: at, screen: shortScreen, properties: cleanProperties(properties),
                             value: value, currency: currency?.uppercased(),
-                            id: id.flatMap { Check.eventId($0) ? $0 : nil }, once: once, orderId: order)
+                            id: id.flatMap { Check.eventId($0) ? $0 : nil }, once: once, orderId: order,
+                            identity: identity)
     }
+
+    /// The largest amount the service accepts.
+    static let maxValue = 1_000_000_000.0
 
     /// At most 10 properties with simple names and short text, numbers or true/false values. Anything else is left out.
     private static func cleanProperties(_ raw: [String: Any]?) -> [String: JSONScalar]? {
@@ -113,6 +128,16 @@ final class TrackedEvent: @unchecked Sendable {
         return out
     }
 
+    /// The form saved on the phone: the sent form plus who the event belongs to (`_iid`, `_uid`).
+    func toStoredJSON() -> [String: Any] {
+        var out = toJSON()
+        if let identity = identity {
+            out["_iid"] = identity.iid
+            if let uid = identity.uid { out["_uid"] = uid }
+        }
+        return out
+    }
+
     /// Reads an event saved on the phone. Returns `nil` if it is damaged.
     static func fromJSON(_ json: Any) -> TrackedEvent? {
         guard let dict = json as? [String: Any], let name = dict["name"] as? String,
@@ -124,6 +149,7 @@ final class TrackedEvent: @unchecked Sendable {
                          currency: dict["currency"] as? String,
                          id: dict["eid"] as? String,
                          once: (dict["once"] as? NSNumber)?.boolValue == true,
-                         orderId: dict["order_id"] as? String)
+                         orderId: dict["order_id"] as? String,
+                         identity: (dict["_iid"] as? String).map { EventIdentity(iid: $0, uid: dict["_uid"] as? String) })
     }
 }

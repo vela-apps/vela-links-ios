@@ -1,5 +1,12 @@
 import Foundation
 
+/// Carries a value the app handed over (event properties, the app's own link handlers) to another thread. The SDK only reads it
+/// there, once, and never shares it with anything else.
+private struct HandedOver<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 /// Cancels a registration made with ``VelaLinks/onLink(_:)``.
 public final class VelaLinkObservation: @unchecked Sendable {
     private let onCancel: () -> Void
@@ -32,6 +39,8 @@ public final class VelaLinks: @unchecked Sendable {
     private var queuedOperations: [Operation] = []
     private var draining = false
     private var pendingLink: VelaLink?
+    /// A link address handed over before `configure` finished: resolved as soon as the engine is installed.
+    private var pendingURL: URL?
     private var handlers: [UUID: (VelaLink) -> Void] = [:]
     private var continuations: [UUID: AsyncStream<VelaLink>.Continuation] = [:]
     private var lastIncoming: URL?
@@ -90,9 +99,11 @@ public final class VelaLinks: @unchecked Sendable {
         // calls to configure run one after another, so two at once cannot leave a half-closed engine behind
         let work: Task<Void, Error> = lock.sync {
             let previous = gate
+            // the settings hold the app's own closures (test doubles, a clock); they are only read by the one install
+            let settings = HandedOver((config, deps, store))
             let task = Task<Void, Error> {
                 await previous?.value
-                try await self.install(config, deps, store)
+                try await self.install(settings.value.0, settings.value.1, settings.value.2)
             }
             gate = Task { _ = try? await task.value }
             return task
@@ -110,13 +121,18 @@ public final class VelaLinks: @unchecked Sendable {
         }
         await old?.stop()
         fresh.tracker.start()
-        let hasQueued: Bool = lock.sync {
+        let (hasQueued, stashed): (Bool, URL?) = lock.sync {
             engine = fresh
             let queued = !queuedOperations.isEmpty && !draining
             if queued { draining = true }
-            return queued
+            let url = pendingURL
+            pendingURL = nil
+            return (queued, url)
         }
         if hasQueued { drain() }
+        // a link that opened the app before the SDK was ready: resolve it now (the 2-second repeat filter already ran when it
+        // arrived, and listeners or the pending-link slot get it like any other link)
+        if let url = stashed { Task { _ = await self.resolve(url: url) } }
         if config.matchDeferred {
             let task = Task { [weak self] in
                 guard let link = await fresh.matcher.run() else { return }
@@ -146,6 +162,7 @@ public final class VelaLinks: @unchecked Sendable {
         deferredTask?.cancel()
         let streams = Array(continuations.values)
         continuations.removeAll()
+        pendingURL = nil
         lock.unlock()
         streams.forEach { $0.finish() }
         if let old = old { Task { await old.stop() } }
@@ -210,8 +227,9 @@ public final class VelaLinks: @unchecked Sendable {
     /// throws and never blocks: an invalid event is ignored. With `once` the event is recorded a single time for the person.
     public func track(_ name: String, properties: [String: Any]? = nil, once: Bool = false) {
         let at = Date()
-        run({ $0.tracker.track(name, properties: properties, once: once, at: at) },
-            direct: { $0.tracker.track(name, properties: properties, once: once) })
+        let props = HandedOver(properties)
+        run({ $0.tracker.track(name, properties: props.value, once: once, at: at) },
+            direct: { $0.tracker.track(name, properties: props.value, once: once) })
     }
 
     /// Records a purchase with its `amount`, for example `trackPurchase(499, currency: "INR")`. Pass your `orderId` and an order
@@ -219,9 +237,10 @@ public final class VelaLinks: @unchecked Sendable {
     public func trackPurchase(_ amount: Double, currency: String = "INR", orderId: String? = nil,
                               properties: [String: Any]? = nil) {
         let at = Date()
-        run({ $0.tracker.track(EventNames.purchase, properties: properties, value: amount, currency: currency,
+        let props = HandedOver(properties)
+        run({ $0.tracker.track(EventNames.purchase, properties: props.value, value: amount, currency: currency,
                                orderId: orderId, at: at) },
-            direct: { $0.tracker.track(EventNames.purchase, properties: properties, value: amount, currency: currency,
+            direct: { $0.tracker.track(EventNames.purchase, properties: props.value, value: amount, currency: currency,
                                        orderId: orderId) })
     }
 
@@ -317,8 +336,11 @@ public final class VelaLinks: @unchecked Sendable {
             lastIncoming = url
             lastIncomingAt = moment
         }
+        // not configured yet: keep the newest address (one) and resolve it when `configure` finishes
+        let waiting = !repeated && engine == nil
+        if waiting { pendingURL = url }
         lock.unlock()
-        if !repeated { Task { _ = await self.resolve(url: url) } }
+        if !repeated && !waiting { Task { _ = await self.resolve(url: url) } }
         return true
     }
 
@@ -385,7 +407,8 @@ public final class VelaLinks: @unchecked Sendable {
         lock.unlock()
         streams.forEach { $0.yield(link) }
         if !listeners.isEmpty {
-            DispatchQueue.main.async { listeners.forEach { $0(link) } }
+            let handed = HandedOver(listeners)
+            DispatchQueue.main.async { handed.value.forEach { $0(link) } }
         }
     }
 }
