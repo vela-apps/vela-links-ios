@@ -1,6 +1,6 @@
 ## 1.1.0
 
-People and in-app messages, the same as the Flutter SDK 0.3.0. Everything is optional: an app that changes nothing works exactly as before.
+New in 1.1.0: identity, consent and push tokens, shopping events, and in-app messages (a bottom sheet or full screen, with a picture or video, drawn by the SDK). Everything is optional: an app that changes nothing works exactly as before.
 
 - **Signed identity.** `setIdentityToken(_:)` takes the token your own server signs when someone signs in (the app never holds the secret).
   It is kept on the phone, sent with events (`identity_token`) and with everything below, and cleared by `resetUser()`.
