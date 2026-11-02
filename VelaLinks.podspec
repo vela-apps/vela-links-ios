@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'VelaLinks'
-  s.version          = '1.0.2'
+  s.version          = '1.1.0'
   s.summary          = 'Deep links, deferred deep links, short links and in-app analytics for iOS apps.'
   s.description      = <<-DESC
     Opens the right screen from a tapped link, a QR code or a custom scheme (even right after install), creates short share
@@ -14,7 +14,7 @@ Pod::Spec.new do |s|
   s.ios.deployment_target = '13.0'
   s.swift_versions   = ['5.9', '5.10']
   s.source_files     = 'Sources/VelaLinks/**/*.swift'
-  s.frameworks       = 'Foundation', 'UIKit'
+  s.frameworks       = 'Foundation', 'UIKit', 'AVFoundation'
   s.weak_frameworks  = 'SwiftUI'
   s.resource_bundles = { 'VelaLinks' => ['Sources/VelaLinks/PrivacyInfo.xcprivacy'] }
 end

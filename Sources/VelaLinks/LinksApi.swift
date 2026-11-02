@@ -45,8 +45,8 @@ final class LinksApi: @unchecked Sendable {
     }
 
     /// One call to the service. A `signed` call carries the key and app id; the public link lookup carries neither.
-    private func call(_ method: String, _ path: String, json: Any? = nil, signed: Bool = true) async throws
-        -> (status: Int, data: Data) {
+    private func call(_ method: String, _ path: String, json: Any? = nil, signed: Bool = true,
+                      headers extra: [String: String] = [:]) async throws -> (status: Int, data: Data) {
         guard let url = URL(string: baseUrl + path) else {
             throw VelaLinksError("The request address is not valid", kind: .invalidArgument)
         }
@@ -54,6 +54,7 @@ final class LinksApi: @unchecked Sendable {
         request.httpMethod = method
         request.httpShouldHandleCookies = false
         if signed { headers().forEach { request.setValue($1, forHTTPHeaderField: $0) } }
+        extra.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         if let json = json {
             guard JSONSerialization.isValidJSONObject(json),
                   let body = try? JSONSerialization.data(withJSONObject: json)
@@ -116,6 +117,38 @@ final class LinksApi: @unchecked Sendable {
         } catch {
             return .retry
         }
+    }
+
+    /// Tells the service something about the signed-in person or a message: `POST` `path` with `body`. Never throws.
+    func post(_ path: String, _ body: [String: Any]) async -> PostResult {
+        do {
+            let (status, data) = try await call("POST", path, json: body)
+            if status >= 200 && status < 300 { return .sent }
+            if status == 403 && LinksApi.detail(status, data) == "identity_required" { return .needsIdentity }
+            // a refused key or a timeout may be put right later (a rotated key, a fixed setup): keep it and try again
+            let retryable = [401, 403, 408, 429].contains(status) || status >= 500
+            return retryable ? .retry : .drop
+        } catch let error as VelaLinksError where error.kind == .invalidArgument {
+            return .drop // a body that cannot be written as JSON can never be sent
+        } catch {
+            return .retry
+        }
+    }
+
+    /// Which features the service has switched on for this app. `nil` when it could not be read (the SDK keeps what it had).
+    func config() async -> [String: Any]? {
+        guard let (status, data) = try? await call("GET", "/v1/sdk/config"), status == 200 else { return nil }
+        return LinksApi.object(data)
+    }
+
+    /// The service's answer to "is there a message for this moment" (`{"message": {...}}` or `{"message": null}`), or `nil` when
+    /// it could not be read.
+    func inAppMessage(_ query: [(String, String)], identityToken: String?) async -> [String: Any]? {
+        let text = query.map { "\(LinksApi.encode($0.0))=\(LinksApi.encode($0.1))" }.joined(separator: "&")
+        let headers = identityToken.map { ["X-Identity-Token": $0] } ?? [:]
+        guard let (status, data) = try? await call("GET", "/v1/inapp/messages?" + text, headers: headers),
+              status == 200 else { return nil }
+        return LinksApi.object(data)
     }
 
     /// Tells the service the app was opened by this link. Never throws: analytics must not affect the app.

@@ -2,7 +2,7 @@ import Foundation
 
 /// Carries a value the app handed over (event properties, the app's own link handlers) to another thread. The SDK only reads it
 /// there, once, and never shares it with anything else.
-private struct HandedOver<Value>: @unchecked Sendable {
+struct HandedOver<Value>: @unchecked Sendable {
     let value: Value
     init(_ value: Value) { self.value = value }
 }
@@ -31,9 +31,9 @@ public final class VelaLinks: @unchecked Sendable {
 
     init() {}
 
-    private typealias Operation = @Sendable (Engine) async -> Void
+    typealias Operation = @Sendable (Engine) async -> Void
 
-    private let lock = NSLock()
+    let lock = NSLock()
     private var engine: Engine?
     private var gate: Task<Void, Never>?
     private var queuedOperations: [Operation] = []
@@ -45,6 +45,7 @@ public final class VelaLinks: @unchecked Sendable {
     private var continuations: [UUID: AsyncStream<VelaLink>.Continuation] = [:]
     private var lastIncoming: URL?
     private var lastIncomingAt: Date?
+    var inAppHandler: InAppMessageHandler?
     private var deferredTask: Task<Void, Never>?
     private static let maxQueuedOperations = 100
 
@@ -64,11 +65,12 @@ public final class VelaLinks: @unchecked Sendable {
     ///   - requestTimeout: the longest any network call may take, in seconds.
     ///   - appId: the bundle id sent with every signed call; read from the app when `nil`.
     ///   - userDefaults: where the SDK keeps its state; pass your own suite if you share data with extensions.
+    ///   - inAppStyle: the colours, corner radius and font of in-app messages.
     /// - Throws: ``VelaLinksError`` with kind `.invalidArgument` for an empty key or an invalid base URL.
     public static func configure(apiKey: String, baseUrl: String, slug: String? = nil, matchDeferred: Bool = true,
                                  reportOpens: Bool = true, trackEvents: Bool = true, autoTrack: Bool = true,
                                  requestTimeout: TimeInterval = 10, appId: String? = nil,
-                                 userDefaults: UserDefaults = .standard) async throws {
+                                 userDefaults: UserDefaults = .standard, inAppStyle: InAppStyle = InAppStyle()) async throws {
         var config = Configuration(apiKey: apiKey, baseUrl: baseUrl)
         config.slug = slug
         config.matchDeferred = matchDeferred
@@ -77,6 +79,7 @@ public final class VelaLinks: @unchecked Sendable {
         config.autoTrack = autoTrack
         config.requestTimeout = requestTimeout
         config.appId = appId
+        config.inAppStyle = inAppStyle
         var deps = Dependencies()
         deps.store = UserDefaultsStorage(userDefaults)
         try await shared.configure(config, deps)
@@ -112,7 +115,9 @@ public final class VelaLinks: @unchecked Sendable {
     }
 
     private func install(_ config: Configuration, _ deps: Dependencies, _ store: VelaLinksStorage) async throws {
-        let fresh = try Engine(config: config, deps: deps, store: store)
+        let callbacks = EngineCallbacks(inAppHandler: { [weak self] in self.flatMap { me in me.lock.sync { me.inAppHandler } } },
+                                        openPage: { [weak self] in self?.deliver($0) })
+        let fresh = try Engine(config: config, deps: deps, store: store, callbacks: callbacks)
         let old: Engine? = lock.sync {
             let previous = engine
             engine = nil
@@ -120,7 +125,7 @@ public final class VelaLinks: @unchecked Sendable {
             return previous
         }
         await old?.stop()
-        fresh.tracker.start()
+        fresh.start()
         let (hasQueued, stashed): (Bool, URL?) = lock.sync {
             engine = fresh
             let queued = !queuedOperations.isEmpty && !draining
@@ -181,7 +186,7 @@ public final class VelaLinks: @unchecked Sendable {
 
     // MARK: Calls made before configure has finished
 
-    private func run(_ operation: @escaping Operation, direct: (Engine) -> Void) {
+    func run(_ operation: @escaping Operation, direct: (Engine) -> Void) {
         lock.lock()
         if let engine = engine, queuedOperations.isEmpty, !draining {
             lock.unlock()
@@ -192,7 +197,12 @@ public final class VelaLinks: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func runAsync(_ operation: @escaping Operation) async {
+    /// Runs a plain (non-async) step on the engine now, or in order once `configure` has finished.
+    func runNow(_ body: @escaping @Sendable (Engine) -> Void) {
+        run({ body($0) }, direct: body)
+    }
+
+    func runAsync(_ operation: @escaping Operation) async {
         let direct: Engine? = lock.sync {
             if let engine = engine, queuedOperations.isEmpty, !draining { return engine }
             if queuedOperations.count < VelaLinks.maxQueuedOperations { queuedOperations.append(operation) }
@@ -253,7 +263,11 @@ public final class VelaLinks: @unchecked Sendable {
     /// Turns event tracking on or off, for example after asking for consent. The choice is remembered. Turning it off also
     /// discards events that were waiting; turning it on starts `first_open` and `session_start`.
     public func setTrackingEnabled(_ enabled: Bool) async {
-        await runAsync { await $0.tracker.setEnabled(enabled) }
+        await runAsync { engine in
+            await engine.tracker.setEnabled(enabled)
+            // what was waiting to be sent about the person is forgotten too
+            if !enabled { engine.people.discard() }
+        }
     }
 
     /// Whether events are being collected right now (`false` before `configure` has finished).
@@ -266,15 +280,26 @@ public final class VelaLinks: @unchecked Sendable {
         await runAsync { await $0.tracker.setUserId(id) }
     }
 
-    /// Starts a new anonymous identity, for example when a person signs out. Earlier activity is not linked to the next person.
+    /// Starts a new anonymous identity, for example when a person signs out. Earlier activity is not linked to the next person, and
+    /// the person's push token is unlinked from them on the service first (waiting at most 3 seconds, ignoring any failure), so
+    /// offers meant for them do not reach the next person on this phone.
     public func resetUser() async {
-        await runAsync { await $0.tracker.reset() }
+        await runAsync { engine in
+            // first, while the person is still known: their push token must not stay theirs on a phone someone else will use.
+            // Sign-out never waits more than 3 seconds for the network, and never fails because of it.
+            await Timeout.run(after: 3) { await engine.people.unlinkPush() }
+            await engine.tracker.reset()
+            engine.people.reset()
+        }
     }
 
-    /// Sends any waiting events now. Events are also sent by themselves every 15 seconds, when 20 are waiting, and when the app
-    /// goes to the background.
+    /// Sends any waiting events now, and the person's waiting properties, push token and consent answers. Events are also sent by
+    /// themselves every 15 seconds, when 20 are waiting, and when the app goes to the background.
     public func flush() async {
-        await runAsync { await $0.tracker.flush() }
+        await runAsync { engine in
+            await engine.tracker.flush()
+            await engine.people.flush()
+        }
     }
 
     // MARK: Links
@@ -400,6 +425,12 @@ public final class VelaLinks: @unchecked Sendable {
     func emit(_ link: VelaLink, from engine: Engine) {
         guard !engine.isDisposed else { return }
         engine.tracker.noteLink(link.code, installSource: link.deferred)
+        deliver(link)
+    }
+
+    /// Hands a link to the listeners (or keeps it for `consumePendingLink()` when nobody listens yet). A page a message button
+    /// opens comes this way too, without being counted as the link that brought the person.
+    func deliver(_ link: VelaLink) {
         lock.lock()
         let listeners = Array(handlers.values)
         let streams = Array(continuations.values)

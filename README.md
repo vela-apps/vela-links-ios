@@ -15,11 +15,11 @@ and **Verify setup** checks them. Save both the iOS bundle id and the Apple Team
 
 **2. Install.** In Xcode: File > Add Package Dependencies, and enter the repository address of this package. Or in `Package.swift`:
 ```swift
-.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.0.2")
+.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.1.0")
 ```
 CocoaPods:
 ```ruby
-pod 'VelaLinks', :git => 'https://github.com/vela-apps/vela-links-ios.git', :tag => '1.0.2'
+pod 'VelaLinks', :git => 'https://github.com/vela-apps/vela-links-ios.git', :tag => '1.1.0'
 ```
 
 **3. Start it** as early as you can (the app's `init` or `application(_:didFinishLaunchingWithOptions:)`):
@@ -137,6 +137,75 @@ class ProductViewController: UIViewController {
 ```
 Or subclass `VelaScreenViewController`. There is no method swizzling: you decide which controllers are screens.
 
+## People, consent and push token
+Everything here is optional, kept on the phone until delivered (so it works offline and survives a restart), and sent only when the person
+is proven. **Your own server signs the identity token** when someone signs in (with the identity secret from the dashboard, which never goes
+in the app); pass it on. Nothing about a person is sent without it.
+```swift
+await VelaLinks.shared.setUserId("user_123")                 // your own id
+await VelaLinks.shared.setIdentityToken(tokenFromYourServer) // nil on sign-out (resetUser() clears it too)
+await VelaLinks.shared.resetUser()                           // on sign-out: first unlinks the push token from the person (at most 3 s, errors ignored)
+
+VelaLinks.shared.setUserProperties(["lang": "te", "orders": 3, "uses_business": true],
+                                   timezone: "Asia/Kolkata", quietStart: 21, quietEnd: 8)
+
+// Firebase:
+VelaLinks.shared.registerPushToken(fcmToken)                 // provider defaults to "fcm"
+// plain APNs, from application(_:didRegisterForRemoteNotificationsWithDeviceToken:):
+VelaLinks.shared.registerPushToken(apnsDeviceToken: deviceToken)
+
+VelaLinks.shared.setConsent("push", granted: true, policyVersion: "2026-10")   // returns false for invalid input
+VelaLinks.shared.setConsent("inapp", granted: false, policyVersion: "2026-10", source: "settings_toggle")
+let allowed = VelaLinks.shared.consentOf("push")             // true, false, or nil if never asked
+print(VelaLinks.shared.installId ?? "")                      // register this phone for testing messages in the dashboard
+```
+Names that sound personal (phone, email, name, address, religion, health ...) and values that look like a phone number or an email are
+dropped before anything is sent; up to 20 properties; `nil` removes one. Channels: `push`, `whatsapp`, `sms`, `email`, `inapp`; purposes:
+`marketing` (default) or `service`. A withdrawal takes effect at once. The push token is collected only if you call `registerPushToken`.
+
+Shopping events campaigns understand ("added to cart, did not order"):
+```swift
+VelaLinks.shared.trackAddToCart(items: 2, cartValue: 540, store: "gpn", category: "sweets")
+VelaLinks.shared.trackRemoveFromCart(items: 1, store: "gpn")
+VelaLinks.shared.trackBeginCheckout(items: 1, cartValue: 540, store: "gpn")
+```
+
+## In-app messages
+The service decides who sees what and when; the SDK draws the message over the screen the person is using, in a window of its own, so
+nothing changes in your views. It works the same for UIKit and SwiftUI apps and picks the active scene on an iPad. Messages are asked for
+at app start, after the app comes back from more than 5 minutes away, after an event and on a screen, and the last two only when the
+service says a live message waits for that event or screen. Never two at once, never while the app is in the background, the keyboard is
+open or a system alert is up. Text, up to two buttons, a picture or a muted looping video with a poster picture. Layouts the SDK does not
+know are ignored, and so is a message whose picture does not load.
+```swift
+// colours, corner radius, font (optional)
+var style = InAppStyle(accent: InAppColor(hex: 0xC2185B), cornerRadius: 24, fontName: "Poppins-Regular")
+try await VelaLinks.configure(apiKey: "vl_...", baseUrl: "...", inAppStyle: style)
+
+VelaLinks.shared.setQuietScreens(["Payment", "Otp"])   // matched from the start of the screen name you report
+VelaLinks.shared.pauseMessages()                        // a game, a video, a payment ...
+VelaLinks.shared.resumeMessages()                       // each pause needs a resume
+```
+Screen names come from `.velaScreen("Name")` (SwiftUI) or `velaTrackScreen("Name")` (UIKit). A button either closes the message or opens a page
+you declared in the dashboard: the SDK hands it to your `onLink` closure (or the `links` stream) like a link that opened the app, with
+`campaign == "inapp"`:
+```swift
+VelaLinks.shared.onLink { link in router.open(link.route, params: link.params) }
+```
+To draw messages yourself, set a handler (main thread). Report what happens with the reporter; your handler opens the page:
+```swift
+VelaLinks.shared.setInAppMessageHandler { message, reporter in
+    reporter.markShown()
+    // ... show message.title, message.body, message.media, message.buttons in your own UI ...
+    reporter.markClicked(0)        // or reporter.markDismissed()
+    router.open(message.buttons[0].route ?? "/")
+}
+VelaLinks.shared.setInAppMessageHandler(nil)   // back to the SDK's own look
+```
+Dynamic Type, dark mode (`InAppStyle.dark`, with `darkSurface` / `darkText` overrides), VoiceOver (the picture's description is read, the
+two-finger Z gesture closes) and Reduce Motion (no sliding, the poster instead of the video) are respected. The person's answer to the
+`inapp` consent channel is applied by the service.
+
 ## Consent first
 By default `first_open` and `session_start` are queued as soon as `configure` runs. If you must ask first:
 ```swift
@@ -160,7 +229,7 @@ launch, and when the app was closed before it could be saved.
 ## Reference
 | Call | What it does |
 | --- | --- |
-| `VelaLinks.configure(apiKey:baseUrl:slug:matchDeferred:reportOpens:trackEvents:autoTrack:requestTimeout:appId:userDefaults:)` | Starts the SDK (throws for an empty key or an insecure base URL). |
+| `VelaLinks.configure(apiKey:baseUrl:slug:matchDeferred:reportOpens:trackEvents:autoTrack:requestTimeout:appId:userDefaults:inAppStyle:)` | Starts the SDK (throws for an empty key or an insecure base URL). |
 | `shared.onLink { }` / `shared.links` | Links that open the app: a closure (main thread) or an `AsyncStream`. |
 | `shared.consumePendingLink()` | The link that arrived before anyone listened, once. |
 | `shared.handle(url:)` / `handle(userActivity:)` | Give the SDK a URL or Universal Link from the system. |
@@ -168,6 +237,9 @@ launch, and when the app was closed before it could be saved.
 | `shared.createLink(route:params:title:...)` | Make a short link (`async throws`). |
 | `shared.track(_:properties:once:)`, `trackPurchase(_:currency:orderId:properties:)`, `trackScreen(_:)` | Events. Never throw, never block. |
 | `shared.setUserId(_:)`, `resetUser()`, `setTrackingEnabled(_:)`, `trackingEnabled`, `flush()` | Identity, consent and sending. |
+| `shared.setIdentityToken(_:)`, `setUserProperties(_:...)`, `registerPushToken(_:provider:)`, `setConsent(_:granted:policyVersion:...)`, `consentOf(_:purpose:)`, `installId` | People, push token and consent (see above). |
+| `shared.trackAddToCart(...)`, `trackRemoveFromCart(...)`, `trackBeginCheckout(...)`, `trackViewItem(...)`, `trackSignup(...)`, `trackLogin(...)` | Standard shopping events. |
+| `shared.setQuietScreens(_:)`, `pauseMessages()`, `resumeMessages()`, `setInAppMessageHandler(_:)` | In-app message controls. |
 | `shared.shutdown()` | Stop listening, send what is waiting, end the streams. |
 
 ## Good to know
@@ -218,6 +290,9 @@ launch, and when the app was closed before it could be saved.
   one-way hash), and the links that brought the install. The service adds a country from the request and keeps no IP address. It
   replaces values that look like an email address or a long phone number, but it cannot recognise names or addresses in free text, so
   do not send personal data.
+- With people data, only if your app calls it: the facts you give (plain labels, numbers, yes/no), the phone's language and optional time zone and
+  quiet hours, the push token, the person's consent answers, and the signed identity token your server made. With in-app messages: the install
+  id, the screen or event name, the language and the message id and what the person did with it (shown, tapped, closed, video progress).
 - First launch after install: the clipboard is read once per try, only to look for a Vela Links token (`vlink:` and letters or digits).
   Any other clipboard text is ignored and never sent. If there is no token, the service can still match the install to a recent tap
   using a one-way hash of the network address (it never stores the address itself). The token is removed from the clipboard once
@@ -227,14 +302,15 @@ launch, and when the app was closed before it could be saved.
 before any consent and even when tracking is off, but sent only once tracking is on); the events not yet sent (names and
 properties, in plain text, for up to 7 days); the links that brought the install and last opened the app; your user id if you set
 one; the names of once-only events already sent; whether first-open was reported and when the app was last active; whether tracking
-is switched off; and whether the first-launch check finished. iCloud backups can restore these onto a new phone, which would give
+is switched off; whether the first-launch check finished; and, if you use people data, the identity token, the facts, push token and
+consent answers waiting to be delivered, what was delivered, and the answers you recorded. iCloud backups can restore these onto a new phone, which would give
 two phones one install id. If that matters to you, pass your own `userDefaults:` suite and keep it out of backups.
 
 **Not used:** no advertising id (IDFA), no hardware device id, no location, no third-party libraries, no method swizzling.
 
 **Privacy manifest.** The package ships `PrivacyInfo.xcprivacy`: no tracking and no tracking domains; the `UserDefaults` required-reason
 API (`CA92.1`); and the data types the SDK can send, all linked to the person and used for analytics only: device id (the random
-install id), user id, product interaction, purchase history and other usage data. Xcode merges it into your app's privacy report.
+install id and, if you pass one, the push token), user id, product interaction, purchase history, other usage data and other data (the facts you give), used for analytics and for the developer's own messages. Xcode merges it into your app's privacy report.
 
 Please describe this in your app's privacy policy, ask for consent where your law requires it, and use it to fill in the App Store
 privacy details.

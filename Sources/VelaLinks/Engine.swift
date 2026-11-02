@@ -25,6 +25,7 @@ struct Configuration {
     var autoTrack = true
     var requestTimeout: TimeInterval = 10
     var appId: String?
+    var inAppStyle = InAppStyle()
 }
 
 /// Replaceable parts, for tests.
@@ -39,6 +40,18 @@ struct Dependencies {
     var flushEvery: TimeInterval = 15
     var flushAt = 20
     var backgroundTasks: BackgroundTaskRunner? = DefaultBackgroundTasks.make()
+    var presenter: InAppPresenter? = DefaultInAppPresenter.make()
+    var inAppTiming = InAppController.Timing()
+    var peopleOptions = PeopleSync.Options()
+    var language: () -> String = DeviceLanguage.code
+    var deviceLocale: () -> String? = DeviceLanguage.locale
+}
+
+/// What the engine needs from the `VelaLinks` object that owns it, so a message button can open a page and the app's own message
+/// handler survives a second `configure`.
+struct EngineCallbacks {
+    var inAppHandler: () -> InAppMessageHandler? = { nil }
+    var openPage: (VelaLink) -> Void = { _ in }
 }
 
 private final class ObserverTokens: @unchecked Sendable {
@@ -50,6 +63,8 @@ final class Engine: @unchecked Sendable {
     let api: LinksApi
     let tracker: EventTracker
     let matcher: DeferredMatcher
+    let people: PeopleSync
+    let inApp: InAppController
     let slug: String?
     let reportOpens: Bool
     private let fetcher: HTTPFetcher
@@ -60,7 +75,7 @@ final class Engine: @unchecked Sendable {
     private var disposed = false
     private var background: [Task<Void, Never>] = []
 
-    init(config: Configuration, deps: Dependencies, store: VelaLinksStorage) throws {
+    init(config: Configuration, deps: Dependencies, store: VelaLinksStorage, callbacks: EngineCallbacks = EngineCallbacks()) throws {
         let fetcher = deps.fetcher ?? HTTPFetcher()
         let explicitId = config.appId
         api = try LinksApi(apiKey: config.apiKey, baseUrl: config.baseUrl, fetcher: fetcher,
@@ -79,7 +94,42 @@ final class Engine: @unchecked Sendable {
         tracker = EventTracker(api: api, store: store, platform: "ios", appVersion: deps.appVersion, now: deps.now,
                                options: options, backgroundTasks: deps.backgroundTasks)
         matcher = DeferredMatcher(api: api, store: store, source: deps.installSource ?? ClipboardInstallSource())
+        let tracker = self.tracker
+        let enabled: () -> Bool = { tracker.isEnabled }
+        people = PeopleSync(api: api, store: store, sources: PeopleSync.Sources(
+            identity: { tracker.currentIdentityToken }, installId: { tracker.installId }, enabled: enabled,
+            platform: "ios", appVersion: { tracker.appVersion }, deviceLocale: deps.deviceLocale),
+                            options: deps.peopleOptions)
+        inApp = InAppController(
+            api: api,
+            sources: InAppController.Sources(installId: { tracker.installId }, identity: { tracker.currentIdentityToken },
+                                             sessionId: { tracker.sessionId }, enabled: enabled, language: deps.language),
+            presenter: deps.presenter, style: config.inAppStyle, timing: deps.inAppTiming, handler: callbacks.inAppHandler,
+            emit: callbacks.openPage, now: deps.now)
+        connectHooks()
         if deps.observeLifecycle { observe() }
+    }
+
+    /// Lets the tracker tell the people sync and the in-app messages what happens.
+    private func connectHooks() {
+        let people = self.people
+        let inApp = self.inApp
+        tracker.hooks = EventTracker.Hooks(
+            onIdentity: { people.nudge() },
+            onForeground: {
+                people.nudge()
+                inApp.onForeground()
+                Task { await inApp.retryReports() }
+            },
+            onBackground: { inApp.onBackground() },
+            onTracked: { name, isScreen in inApp.onTracked(name, isScreen: isScreen) })
+    }
+
+    /// Starts what needs the tracker's saved state: the people sync and the start-up message.
+    func start() {
+        tracker.start()
+        people.start()
+        inApp.onStart()
     }
 
     var isDisposed: Bool { lock.lock(); defer { lock.unlock() }; return disposed }
@@ -115,6 +165,8 @@ final class Engine: @unchecked Sendable {
         lock.sync { disposed = true }
         observers.tokens.forEach { center.removeObserver($0) }
         observers.tokens = []
+        inApp.stop()
+        people.stop()
         await tracker.stop()
         if ownsFetcher { fetcher.invalidate() }
     }

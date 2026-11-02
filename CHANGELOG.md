@@ -1,3 +1,29 @@
+## 1.1.0
+
+People and in-app messages, the same as the Flutter SDK 0.3.0. Everything is optional: an app that changes nothing works exactly as before.
+
+- **Signed identity.** `setIdentityToken(_:)` takes the token your own server signs when someone signs in (the app never holds the secret).
+  It is kept on the phone, sent with events (`identity_token`) and with everything below, and cleared by `resetUser()`.
+- **Facts about the person.** `setUserProperties(_:locale:timezone:quietStart:quietEnd:)` sends plain labels, numbers and yes/no (up to 20) with
+  the phone's language. Names that sound personal and values that look like a phone number or an email are dropped on the phone. Only what
+  changed is sent.
+- **Push token and consent.** `registerPushToken(_:provider:)` (`fcm` by default, `apns` for the raw token, or `registerPushToken(apnsDeviceToken:)`)
+  and `setConsent(_:granted:policyVersion:purpose:source:)` with `consentOf(_:purpose:)`. Kept on the phone until delivered (offline-safe,
+  survive a restart), sent only with an identity, never sent twice, forgotten when tracking is switched off or the user is reset.
+- **Signing out.** `resetUser()` first asks the service to unlink the push token from the person (waiting at most 3 seconds, ignoring any
+  failure), so offers meant for them do not reach the next person on the phone. Nothing is sent if no token was ever given.
+- **Shopping events.** `trackAddToCart`, `trackRemoveFromCart`, `trackBeginCheckout`, `trackViewItem`, `trackSignup`, `trackLogin`.
+- **In-app messages.** The SDK asks the service for a message at start, on return from the background (after 5 minutes away), after an event and on a
+  screen, draws it over the active scene in a window of its own (UIKit and SwiftUI apps, bottom sheet or full screen, picture or muted video with
+  its poster as the fallback), reports shown / clicked / dismissed / video progress (`shown` the moment it is on the screen) and hands a button's page
+  to `onLink` / `links`. `setQuietScreens`, `pauseMessages()` / `resumeMessages()`, `InAppStyle` (passed to `configure`) and
+  `setInAppMessageHandler` let the app keep control. Dynamic Type, dark mode, VoiceOver and Reduce Motion are respected.
+- After an event or a screen the SDK asks only when the service says a live message waits for it (`trigger_events`, `trigger_screens`, kept 10 minutes).
+- `installId` shows this phone's id (to register a test phone in the dashboard). `flush()` also sends the waiting person data.
+- `PrivacyInfo.xcprivacy`: the push token and facts the app chooses to send are covered (device id, user id and other data, for the developer's own
+  messages as well as analytics). A push token is collected only if the app passes one.
+- New system framework: AVFoundation (for video).
+
 ## 1.0.2
 
 Small fixes and clearer notes.

@@ -28,6 +28,14 @@ enum StorageKeys {
     static let onceDone = "vela_links.once_done"
     static let deferredChecked = "vela_links.deferred_checked"
     static let deferredAttempts = "vela_links.deferred_attempts"
+    static let identityToken = "vela_links.identity_token"
+    static let pendingProps = "vela_links.pending_props"
+    static let pendingProfile = "vela_links.pending_profile"
+    static let sentProps = "vela_links.sent_props"
+    static let pendingPush = "vela_links.pending_push"
+    static let sentPush = "vela_links.sent_push"
+    static let pendingConsent = "vela_links.pending_consent"
+    static let consentState = "vela_links.consent_state"
 }
 
 /// Keeps the state in a `UserDefaults` (the standard one, or a suite of your choice).

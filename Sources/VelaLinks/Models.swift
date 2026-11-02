@@ -104,6 +104,17 @@ enum EventSendResult: Equatable {
     case drop
 }
 
+/// What happened to a call about a person or a message.
+enum PostResult: Equatable {
+    case sent
+    /// Try again later (no network, busy, a server problem, a refused key).
+    case retry
+    /// The service will never accept it.
+    case drop
+    /// The service wants a signed identity token first: keep it until there is one.
+    case needsIdentity
+}
+
 /// The events the SDK reports by itself, and the names it keeps for itself.
 public enum EventNames {
     /// The first time the app is opened after install.

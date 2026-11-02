@@ -18,6 +18,18 @@ final class EventTracker: @unchecked Sendable {
         var identityFlushTimeout: TimeInterval = 5
     }
 
+    /// What the tracker tells the rest of the SDK (the people sync and the in-app messages). Called outside the tracker's lock.
+    struct Hooks {
+        /// The identity token changed, so what was waiting for an identity can be sent.
+        var onIdentity: (() -> Void)?
+        /// The app came back from the background.
+        var onForeground: (() -> Void)?
+        /// The app went to the background.
+        var onBackground: (() -> Void)?
+        /// An event or a screen was recorded, with its name (the screen name for a screen view).
+        var onTracked: ((_ name: String, _ isScreen: Bool) -> Void)?
+    }
+
     private static let sameEvent: TimeInterval = 1
     private static let maxQueue = 200
     private static let maxBatch = 50
@@ -56,6 +68,9 @@ final class EventTracker: @unchecked Sendable {
     private var firstLink: String?
     private var lastLink: String?
     private var uid: String?
+    private var identityToken: String?
+    private var sid: String?
+    private var hooksStore = Hooks()
     private var version: String?
     private var onceDone = Set<String>()
     private var lastEventKey: EventKey?
@@ -95,6 +110,31 @@ final class EventTracker: @unchecked Sendable {
     /// Waits until everything handed to the storage queue has been written (used by tests and by shutdown).
     func drainStorage() { io.sync {} }
 
+    /// This install's random id (`nil` until `start()` has loaded or made it).
+    var installId: String? { locked { iid } }
+
+    /// The app's version label, cleaned (`nil` until `start()`).
+    var appVersion: String? { locked { version } }
+
+    /// The signed proof of who the person is, given by the app after sign-in (see `setIdentityToken`).
+    var currentIdentityToken: String? { locked { identityToken } }
+
+    /// A random id for the current visit: it changes whenever a new session starts. Messages use it to show at most one per visit.
+    var sessionId: String {
+        locked {
+            if let id = sid { return id }
+            let fresh = Check.randomHex(16)
+            sid = fresh
+            return fresh
+        }
+    }
+
+    /// The hooks the rest of the SDK listens with.
+    var hooks: Hooks {
+        get { locked { hooksStore } }
+        set { locked { hooksStore = newValue } }
+    }
+
     @discardableResult
     private func locked<T>(_ body: () -> T) -> T {
         lock.lock()
@@ -119,7 +159,7 @@ final class EventTracker: @unchecked Sendable {
             if wasReset {
                 persist { store in
                     for key in [StorageKeys.firstLink, StorageKeys.lastLink, StorageKeys.queue, StorageKeys.userId,
-                                StorageKeys.onceDone] { try store.remove(forKey: key) }
+                                StorageKeys.identityToken, StorageKeys.onceDone] { try store.remove(forKey: key) }
                 }
             }
             if existing == nil {
@@ -130,6 +170,7 @@ final class EventTracker: @unchecked Sendable {
             let first: String? = wasReset ? nil : try store.string(forKey: StorageKeys.firstLink)
             let last: String? = wasReset ? nil : try store.string(forKey: StorageKeys.lastLink)
             let user: String? = wasReset ? nil : try store.string(forKey: StorageKeys.userId)
+            let proof: String? = wasReset ? nil : try store.string(forKey: StorageKeys.identityToken)
             let onceKeys: [String] = wasReset ? [] : try store.strings(forKey: StorageKeys.onceDone) ?? []
             let restored: [TrackedEvent] = wasReset ? [] : try restoreQueue()
             locked {
@@ -143,6 +184,7 @@ final class EventTracker: @unchecked Sendable {
                 firstLink = first
                 lastLink = last
                 uid = user
+                identityToken = proof
                 // entries saved by 0.2.0 of the sister SDKs are plain names: they belong to the anonymous person
                 for key in onceKeys { onceDone.insert(key.contains("|") ? key : "|" + key) }
                 // events tracked before start() were also saved: do not queue those twice
@@ -191,15 +233,21 @@ final class EventTracker: @unchecked Sendable {
             let last = try store.int(forKey: StorageKeys.lastActive)
             if let last = last {
                 let away = moment.timeIntervalSince(Date(timeIntervalSince1970: Double(last) / 1000))
-                if away > options.sessionGap { track(EventNames.sessionStart) }
+                if away > options.sessionGap { startSession() }
             } else {
-                track(EventNames.sessionStart)
+                startSession()
             }
             let ms = Int((moment.timeIntervalSince1970 * 1000).rounded(.down))
             persist { try $0.setInt(ms, forKey: StorageKeys.lastActive) }
         } catch {
             // storage trouble: no automatic events this time
         }
+    }
+
+    /// A new visit: it gets a new session id, then `session_start` is recorded.
+    private func startSession() {
+        locked { sid = Check.randomHex(16) }
+        track(EventNames.sessionStart)
     }
 
     // MARK: Tracking
@@ -211,6 +259,7 @@ final class EventTracker: @unchecked Sendable {
                screen: String? = nil, once: Bool = false, orderId: String? = nil, at date: Date? = nil) {
         enum After { case nothing, flushNow }
         let moment = date ?? now()
+        var recorded: TrackedEvent?
         let after: After = locked {
             guard enabled else { return .nothing }
             guard let event = TrackedEvent.tryCreate(name, at: moment, screen: screen, properties: properties, value: value,
@@ -244,12 +293,17 @@ final class EventTracker: @unchecked Sendable {
                 let cheap = queue.firstIndex { $0.name == EventNames.screenView }
                 queue.remove(at: cheap ?? 0)
             }
+            recorded = event
             saveLocked()
             if queue.count >= options.flushAt { return .flushNow }
             scheduleLocked()
             return .nothing
         }
         if after == .flushNow { Task { await self.flush() } }
+        if let event = recorded {
+            let isScreen = event.name == EventNames.screenView
+            hooks.onTracked?(isScreen ? (event.screen ?? "") : event.name, isScreen)
+        }
     }
 
     /// Who an event tracked right now belongs to (`nil` before the install id exists).
@@ -369,6 +423,8 @@ final class EventTracker: @unchecked Sendable {
     private func envelopeLocked(_ batch: [TrackedEvent], _ bid: String, _ owner: EventIdentity) -> [String: Any] {
         var out: [String: Any] = ["iid": owner.iid, "bid": bid, "events": batch.map { $0.toJSON() }]
         if let uid = owner.uid { out["uid"] = uid }
+        // the proof belongs to the person signed in now: events of an earlier person go out without it
+        if let proof = identityToken, owner.uid == uid { out["identity_token"] = proof }
         if let platform = platform { out["platform"] = platform }
         if let version = version { out["app_version"] = version }
         if let firstLink = firstLink { out["first_link"] = firstLink }
@@ -439,6 +495,31 @@ final class EventTracker: @unchecked Sendable {
         }
     }
 
+    /// Gives the signed identity token the app's own server made at sign-in (`nil` on sign-out). It is sent with events and with
+    /// anything that needs to know who the person really is. A token with spaces, or over 1000 characters, is ignored.
+    func setIdentityToken(_ token: String?) async {
+        var clean: String?
+        if let token = token {
+            guard let accepted = PeopleRules.cleanIdentityToken(token) else { return }
+            clean = accepted
+        }
+        let changed: Bool = locked {
+            guard clean != identityToken else { return false }
+            identityToken = clean
+            if started {
+                if let clean = clean {
+                    persist { try $0.setString(clean, forKey: StorageKeys.identityToken) }
+                } else {
+                    persist { try $0.remove(forKey: StorageKeys.identityToken) }
+                }
+            }
+            return true
+        }
+        guard changed else { return }
+        hooks.onIdentity?()
+        locked { scheduleLocked() }
+    }
+
     /// Sends what is waiting before the identity changes, so those events are not attributed to the next person (or lost). It
     /// waits a few seconds at most, so a bad connection cannot hold up a sign-out.
     private func flushBeforeIdentityChange() async {
@@ -461,6 +542,7 @@ final class EventTracker: @unchecked Sendable {
             firstLink = nil
             lastLink = nil
             uid = nil
+            identityToken = nil
             lastScreen = nil
             onceDone.removeAll()
             guard started else {
@@ -470,7 +552,7 @@ final class EventTracker: @unchecked Sendable {
             guard !storageFailed else { return }
             persist { store in
                 for key in [StorageKeys.firstLink, StorageKeys.lastLink, StorageKeys.queue, StorageKeys.userId,
-                            StorageKeys.onceDone] { try store.remove(forKey: key) }
+                            StorageKeys.identityToken, StorageKeys.onceDone] { try store.remove(forKey: key) }
             }
             let fresh = Check.randomHex(32)
             iid = fresh
@@ -483,6 +565,7 @@ final class EventTracker: @unchecked Sendable {
     /// The app went to the background: remember when, and send what is waiting (ignoring any back-off).
     func appDidEnterBackground() {
         locked { inBackground = true }
+        hooks.onBackground?()
         guard isEnabled else { return }
         let ms = Int((now().timeIntervalSince1970 * 1000).rounded(.down))
         persist { try $0.setInt(ms, forKey: StorageKeys.lastActive) }
@@ -498,8 +581,8 @@ final class EventTracker: @unchecked Sendable {
     /// The app came back: a visit after a long absence is a new session.
     func appWillEnterForeground() {
         locked { inBackground = false }
-        guard isEnabled, options.autoTrack else { return }
-        automaticEvents()
+        if isEnabled, options.autoTrack { automaticEvents() }
+        hooks.onForeground?()
     }
 
     /// Stops the timer and sends what is left.
