@@ -17,15 +17,30 @@ public struct VelaLink {
     public let campaign: String?
     /// True when the link was matched on the first launch after install.
     public let deferred: Bool
+    /// The id of the click that led to the install, when the service sends one (newer servers, first-launch matches only).
+    public let clickId: String?
+    /// The click's `utm_source`, `utm_medium`, `utm_campaign`, `utm_content` and `utm_term`, when the service sends them.
+    public let utm: [String: String]
 
     public init(code: String, route: String, params: [String: Any] = [:], title: String? = nil,
-                campaign: String? = nil, deferred: Bool = false) {
+                campaign: String? = nil, deferred: Bool = false, clickId: String? = nil, utm: [String: String] = [:]) {
         self.code = code
         self.route = route
         self.params = params
         self.title = title
         self.campaign = campaign
         self.deferred = deferred
+        self.clickId = clickId
+        self.utm = utm
+    }
+
+    /// The utm keys a link answer may carry.
+    static let utmKeys = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"]
+
+    /// A short plain value, or `nil`: optional extras never make a link unreadable.
+    private static func shortText(_ value: Any?) -> String? {
+        guard let text = value as? String, !text.isEmpty, text.count <= 200 else { return nil }
+        return text
     }
 
     /// Reads a link from the service's JSON. Returns `nil` instead of failing when the data is not a valid link.
@@ -44,8 +59,10 @@ public struct VelaLink {
         let title = optionalText("title")
         let campaign = optionalText("campaign")
         guard title.ok, campaign.ok else { return nil }
+        var utm: [String: String] = [:]
+        for key in utmKeys { if let value = shortText(json[key]) { utm[key] = value } }
         return VelaLink(code: code, route: route, params: params, title: title.value, campaign: campaign.value,
-                        deferred: deferred)
+                        deferred: deferred, clickId: shortText(json["click_id"]), utm: utm)
     }
 }
 

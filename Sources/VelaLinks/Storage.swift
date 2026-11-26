@@ -36,6 +36,7 @@ enum StorageKeys {
     static let sentPush = "vela_links.sent_push"
     static let pendingConsent = "vela_links.pending_consent"
     static let consentState = "vela_links.consent_state"
+    static let offersDefaultOn = "vela_links.offers_default_on"
 }
 
 /// Keeps the state in a `UserDefaults` (the standard one, or a suite of your choice).

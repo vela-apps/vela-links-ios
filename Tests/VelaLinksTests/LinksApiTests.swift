@@ -114,12 +114,30 @@ final class LinksApiTests: XCTestCase {
         }
     }
 
-    func testThePublicLookupCarriesNeitherTheKeyNorTheAppId() async throws {
+    func testTheLinkLookupCarriesTheKeyAndTheAppIdSince120() async throws {
         FakeURLProtocol.reset { _ in .reply(404, "{}") }
         _ = try await makeApi(appId: { "com.acme.shop" }, key: "secret-key").resolve(slug: "s", code: "abc")
-        let headers = (FakeURLProtocol.seen.first?.headers ?? [:]).keys.map { $0.lowercased() }
-        XCTAssertFalse(headers.contains("x-api-key"))
-        XCTAssertFalse(headers.contains("x-app-id"))
+        XCTAssertEqual(FakeURLProtocol.seen.first?.header("X-Api-Key"), "secret-key")
+        XCTAssertEqual(FakeURLProtocol.seen.first?.header("X-App-Id"), "com.acme.shop")
+    }
+
+    func testALinkLookupRefusedWith401IsTriedOnceMoreUnsigned() async throws {
+        // a debug or staging build whose bundle id is not saved in the dashboard
+        FakeURLProtocol.reset { request in
+            request.header("X-Api-Key") != nil
+                ? .reply(401, "{\"detail\":\"unknown app\"}")
+                : .reply(200, "{\"code\":\"abc\",\"route\":\"/x\",\"params\":{}}")
+        }
+        let link = try await makeApi(appId: { "com.acme.shop.debug" }, key: "secret-key").resolve(slug: "s", code: "abc")
+        XCTAssertEqual(link?.route, "/x")
+        XCTAssertEqual(FakeURLProtocol.seen.map { $0.header("X-Api-Key") != nil }, [true, false])
+    }
+
+    func testALinkLookupIsNotRetriedForOtherRefusals() async throws {
+        FakeURLProtocol.reset { _ in .reply(404, "{}") }
+        let link = try await makeApi().resolve(slug: "s", code: "abc")
+        XCTAssertNil(link)
+        XCTAssertEqual(FakeURLProtocol.seen.count, 1)
     }
 
     func testTheKeyIsNeverPartOfAnErrorMessage() async throws {

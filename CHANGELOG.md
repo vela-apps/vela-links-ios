@@ -1,3 +1,32 @@
+## 1.2.0
+
+- **Push opens.** `trackPushOpen(userInfo)` reads a Vela push's `vela_campaign`, `vela_route` and `vela_params`, records the `push_open`
+  event with the campaign id (what the push report counts as an open) and returns a `VelaPushOpen` with the route and its values. The same
+  push handed over twice is counted once in the process: it is known by the service's `vela_send_id` in the push data, else by
+  `gcm.message_id` (or the `messageId` you pass), else the same campaign within 10 minutes counts once.
+- **Consent read-back.** `setIdentityToken(_:)` now also reads the person's own consent answers from Vela Links
+  (`POST /v1/users/consent/state`), so `consentOf` shows what is really recorded after a sign-in again or on a new phone. `refreshConsent()`
+  does it on demand. An answer given on this phone and not delivered yet (or chosen while the read was on its way) wins, and an answer
+  that arrives after a sign-out is dropped. An older server is ignored and nothing changes.
+- **Offers on by default.** `offersDefaultOn` is the app's "offers on by default" setting, read with the consent answers (false until read
+  and with a server that does not send it); `offersEnabled(_:)` is `consentOf(channel) ?? offersDefaultOn`.
+- **No more paste notice.** Links on iPhone go straight to the App Store (no token is copied), so the first-launch check no longer reads the
+  clipboard. An app with no App Store address in the dashboard can pass `configure(..., clipboardMatch: true)` to keep reading it.
+- **Better install matching.** The first-launch check sends the screen size in points (`screen_width`, `screen_height`, portrait),
+  `pixel_ratio` (`UIScreen.scale`), the time zone (`timezone`, IANA), the language (`language`, such as `en-IN`) and the iOS version
+  (`os_version`), which the service uses to tell apart taps from the same network (a match may come back with `method: "signals"`).
+- **The install id goes with the match and the open report** (`iid`), so the service remembers which install claimed a tap and counts one
+  open per install and link. Only while tracking is on: never with `trackEvents: false` or after `setTrackingEnabled(false)`.
+- **The link lookup is signed.** `GET /v1/links/{slug}/{code}` now carries `X-Api-Key` and `X-App-Id` like every other call, so the service
+  can require the key later. A key only reads its own app's links: a link of another app is "not found" (already ignored with `slug`). A
+  signed lookup refused with 401 (for example a debug or staging build whose bundle id is not saved in the dashboard) is tried once more
+  unsigned, so links keep opening there.
+- **`VelaLink.clickId` and `VelaLink.utm`** carry the click id and utm values (`click_id` and the `utm` object of the answer) when a newer
+  server sends them with a first-launch match.
+- **Push tokens:** Vela sends through Firebase only, so register the FCM token. `registerPushToken(_:provider: "apns")` now logs a warning,
+  and `registerPushToken(apnsDeviceToken:)` is deprecated (it still works).
+- Calls made before `configure` has finished were already kept (up to 100) and run in order; nothing changes there.
+
 ## 1.1.0
 
 New in 1.1.0: identity, consent and push tokens, shopping events, and in-app messages (a bottom sheet or full screen, with a picture or video, drawn by the SDK). Everything is optional: an app that changes nothing works exactly as before.

@@ -70,6 +70,8 @@ struct PeopleState {
     var consents: [ConsentAnswer] = []
     /// What the person last chose here, by `channel/purpose`: for the app's own settings screen.
     var answers: [String: Bool] = [:]
+    /// The app's "offers on by default" setting, as last read back from the service.
+    var offersDefaultOn = false
 
     // MARK: Saving and loading (JSON text in the storage)
 
@@ -104,6 +106,7 @@ struct PeopleState {
         for (key, value) in PeopleState.object(try store.string(forKey: StorageKeys.consentState)) {
             if let flag = value as? NSNumber { answers[key] = flag.boolValue }
         }
+        offersDefaultOn = try store.bool(forKey: StorageKeys.offersDefaultOn) ?? false
     }
 
     init() {}
@@ -117,6 +120,7 @@ struct PeopleState {
         try? store.setString(PeopleState.text(pending), forKey: StorageKeys.pendingPush)
         try? store.setString(PeopleState.text(consents.map { $0.json }), forKey: StorageKeys.pendingConsent)
         try? store.setString(PeopleState.text(answers), forKey: StorageKeys.consentState)
+        try? store.setBool(offersDefaultOn, forKey: StorageKeys.offersDefaultOn)
         if let sentPush = sentPush {
             try? store.setString(sentPush, forKey: StorageKeys.sentPush)
         } else {

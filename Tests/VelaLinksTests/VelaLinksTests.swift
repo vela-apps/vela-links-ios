@@ -176,18 +176,18 @@ final class VelaLinksTests: XCTestCase {
         XCTAssertTrue(FakeURLProtocol.seen.filter { $0.path == "/v1/open" }.isEmpty)
     }
 
-    func testEveryCallCarriesTheAppIdExceptThePublicLookup() async throws {
+    func testEveryCallCarriesTheAppIdIncludingTheLinkLookup() async throws {
         FakeURLProtocol.reset { self.linkReply($0) }
         let s = try await sdk(config(appId: "com.acme.shop"))
         _ = try await s.createLink(route: "/x")
         _ = await s.resolve(url: url("https://h/l/s/abc"))
         await s.currentEngine()?.idle()
-        let signed = FakeURLProtocol.seen.filter { $0.path != "/v1/links/s/abc" }
-        XCTAssertEqual(signed.count, 2) // create and open report
-        XCTAssertTrue(signed.allSatisfy { $0.header("X-App-Id") == "com.acme.shop" })
-        let lookup = FakeURLProtocol.seen.first { $0.path == "/v1/links/s/abc" }
-        XCTAssertNil(lookup?.header("X-App-Id"))
-        XCTAssertNil(lookup?.header("X-Api-Key"))
+        let calls = FakeURLProtocol.seen
+        XCTAssertEqual(calls.count, 3) // create, the lookup (signed since 1.2.0) and the open report
+        XCTAssertTrue(calls.allSatisfy { $0.header("X-App-Id") == "com.acme.shop" && $0.header("X-Api-Key") != nil })
+        // the open report carries the install id, so the service counts one open per install and link
+        let open = calls.first { $0.path == "/v1/open" }
+        XCTAssertEqual((open?.json?["iid"] as? String)?.count, 32)
     }
 
     func testTheBundleIdentifierIsTheDefaultAppId() async throws {
@@ -384,7 +384,9 @@ final class VelaLinksTests: XCTestCase {
                 : self.linkReply(r)
         }
         let source = FakeInstallSource("vlink:Ab12Cd34Ef")
-        let s = try await sdk(config(matchDeferred: true), deps(source: source))
+        var c = config(matchDeferred: true)
+        c.clipboardMatch = true // since 1.2.0 the clipboard is read only when the app asks for it
+        let s = try await sdk(c, deps(source: source))
         await s.waitForDeferredCheck()
         let link = try XCTUnwrap(s.consumePendingLink())
         XCTAssertTrue(link.deferred)

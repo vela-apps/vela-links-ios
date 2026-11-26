@@ -59,7 +59,7 @@ final class ClipboardInstallSource: InstallSource, @unchecked Sendable {
 /// Matches the first launch after install to the link tap that led to it (a deferred deep link). Runs until it succeeds, at most
 /// three tries.
 final class DeferredMatcher: @unchecked Sendable {
-    /// The most failed launches before giving up. Each try reads the clipboard, which can show a paste notice.
+    /// The most failed launches before giving up.
     static let maxAttempts = 3
     /// What the link page puts on the iOS clipboard in front of the token.
     static let iosPrefix = "vlink:"
@@ -67,11 +67,22 @@ final class DeferredMatcher: @unchecked Sendable {
     private let api: LinksApi
     private let store: VelaLinksStorage
     private let source: InstallSource
+    private let readClipboard: Bool
+    private let signals: @Sendable () async -> [String: Any]
+    private let installId: @Sendable () -> String?
 
-    init(api: LinksApi, store: VelaLinksStorage, source: InstallSource) {
+    /// `readClipboard` is off by default: links on iPhone go straight to the App Store and no token is copied, so reading would only
+    /// show iOS's paste notice. `signals` gives the plain device facts sent with the match (see ``DeviceSignals``), and `installId`
+    /// this install's id, so the service remembers which install claimed the tap.
+    init(api: LinksApi, store: VelaLinksStorage, source: InstallSource, readClipboard: Bool = false,
+         signals: @escaping @Sendable () async -> [String: Any] = DeviceSignals.read,
+         installId: @escaping @Sendable () -> String? = { nil }) {
         self.api = api
         self.store = store
         self.source = source
+        self.readClipboard = readClipboard
+        self.signals = signals
+        self.installId = installId
     }
 
     /// Picks our token out of what the clipboard holds, and nothing else. Returns `nil` when there is none.
@@ -88,19 +99,26 @@ final class DeferredMatcher: @unchecked Sendable {
             return nil
         }
         do {
-            let token = DeferredMatcher.extractToken(await source.readToken())
-            guard let answer = try await api.match(platform: "ios", token: token) else { return failed() }
+            let token = readClipboard ? DeferredMatcher.extractToken(await source.readToken()) : nil
+            guard let answer = try await api.match(platform: "ios", token: token, signals: await signals(), iid: installId()) else {
+                return failed()
+            }
             try store.setBool(true, forKey: StorageKeys.deferredChecked)
             // The token is used up whether or not it matched, so it is taken off the clipboard.
             if let token = token { await source.clearToken(token) }
-            guard answer["matched"] as? Bool == true, let link = answer["link"] as? [String: Any] else { return nil }
+            guard answer["matched"] as? Bool == true, var link = answer["link"] as? [String: Any] else { return nil }
+            // newer servers send the click's id and its utm values (a `utm` object) beside the link (`method` may be "signals")
+            if link["click_id"] == nil, let click = answer["click_id"] { link["click_id"] = click }
+            if let utm = answer["utm"] as? [String: Any] {
+                for key in VelaLink.utmKeys where link[key] == nil { if let value = utm[key] { link[key] = value } }
+            }
             return VelaLink.tryParse(link, deferred: true)
         } catch {
             return failed() // matching must never break app start-up
         }
     }
 
-    /// Counts a failed try; after `maxAttempts` the check is given up so the clipboard is not read launch after launch.
+    /// Counts a failed try; after `maxAttempts` the check is given up.
     private func failed() -> VelaLink? {
         do {
             let attempts = (try store.int(forKey: StorageKeys.deferredAttempts) ?? 0) + 1
@@ -110,5 +128,31 @@ final class DeferredMatcher: @unchecked Sendable {
             // storage trouble: try again next launch
         }
         return nil
+    }
+}
+
+/// Plain facts about the phone that the link page also sees, sent with the first-launch match so the service can tell two taps from
+/// the same network apart, under the service's names: `screen_width` and `screen_height` (points, portrait: the short side is the
+/// width), `pixel_ratio` (`UIScreen.scale`), `timezone` (IANA), `language` (BCP-47, such as `en-IN`) and `os_version`. None of them
+/// identifies a person or a device on its own; a value that cannot be read is left out.
+enum DeviceSignals {
+    @Sendable static func read() async -> [String: Any] {
+        var out: [String: Any] = [:]
+        #if canImport(UIKit) && !os(watchOS)
+        let facts: (CGSize, CGFloat, String) = await MainActor.run {
+            (UIScreen.main.bounds.size, UIScreen.main.scale, UIDevice.current.systemVersion)
+        }
+        let (a, b) = (Double(facts.0.width), Double(facts.0.height))
+        if a > 0, b > 0, a < 10_000, b < 10_000 {
+            out["screen_width"] = min(a, b)
+            out["screen_height"] = max(a, b)
+        }
+        if facts.1 > 0, facts.1 < 10 { out["pixel_ratio"] = Double(facts.1) }
+        if !facts.2.isEmpty, facts.2.count <= 20 { out["os_version"] = facts.2 }
+        #endif
+        let zone = TimeZone.current.identifier
+        if !zone.isEmpty, zone.count <= 64 { out["timezone"] = zone }
+        if let lang = Locale.preferredLanguages.first, !lang.isEmpty, lang.count <= 35 { out["language"] = lang }
+        return out
     }
 }

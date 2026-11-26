@@ -44,7 +44,7 @@ final class LinksApi: @unchecked Sendable {
         return out
     }
 
-    /// One call to the service. A `signed` call carries the key and app id; the public link lookup carries neither.
+    /// One call to the service. A `signed` call carries the key and app id (every call the SDK makes now does).
     private func call(_ method: String, _ path: String, json: Any? = nil, signed: Bool = true,
                       headers extra: [String: String] = [:]) async throws -> (status: Int, data: Data) {
         guard let url = URL(string: baseUrl + path) else {
@@ -90,15 +90,23 @@ final class LinksApi: @unchecked Sendable {
 
     /// Looks a link up. Returns `nil` when it does not exist, has expired, or the answer cannot be read.
     func resolve(slug: String, code: String) async throws -> VelaLink? {
-        let (status, data) = try await call("GET", "/v1/links/\(LinksApi.encode(slug))/\(LinksApi.encode(code))",
-                                            signed: false)
+        let path = "/v1/links/\(LinksApi.encode(slug))/\(LinksApi.encode(code))"
+        // signed since 1.2.0: the service may require the key, and a key only reads its own app's links
+        var (status, data) = try await call("GET", path)
+        if status == 401 {
+            // the key or app id was refused (for example a debug or staging build whose bundle id is not saved in the dashboard):
+            // ask once more without them, the way links were looked up before 1.2.0, so links keep opening
+            (status, data) = try await call("GET", path, signed: false)
+        }
         guard status == 200, let object = LinksApi.object(data) else { return nil }
         return VelaLink.tryParse(object)
     }
 
     /// First-launch matching. Returns the parsed answer, or `nil` when the service could not give one (try again next launch).
-    func match(platform: String, token: String?) async throws -> [String: Any]? {
-        var body: [String: Any] = ["platform": platform]
+    func match(platform: String, token: String?, signals: [String: Any] = [:], iid: String? = nil) async throws -> [String: Any]? {
+        var body: [String: Any] = signals
+        body["platform"] = platform
+        if let iid = iid, LinksApi.validInstallId(iid) { body["iid"] = iid }
         if let token = token { body["token"] = token }
         let (status, data) = try await call("POST", "/v1/match", json: body)
         return status == 200 ? LinksApi.object(data) : nil
@@ -135,6 +143,12 @@ final class LinksApi: @unchecked Sendable {
         }
     }
 
+    /// `POST` `path` with `body` and returns the answer's JSON object, or `nil` for any failure. Never throws.
+    func postForObject(_ path: String, _ body: [String: Any]) async -> [String: Any]? {
+        guard let (status, data) = try? await call("POST", path, json: body), status >= 200 && status < 300 else { return nil }
+        return LinksApi.object(data)
+    }
+
     /// Which features the service has switched on for this app. `nil` when it could not be read (the SDK keeps what it had).
     func config() async -> [String: Any]? {
         guard let (status, data) = try? await call("GET", "/v1/sdk/config"), status == 200 else { return nil }
@@ -152,8 +166,16 @@ final class LinksApi: @unchecked Sendable {
     }
 
     /// Tells the service the app was opened by this link. Never throws: analytics must not affect the app.
-    func reportOpen(code: String, source: String) async {
-        _ = try? await call("POST", "/v1/open", json: ["code": code, "source": source])
+    func reportOpen(code: String, source: String, iid: String? = nil) async {
+        var body: [String: Any] = ["code": code, "source": source]
+        // the install id lets the service count one open per install and link
+        if let iid = iid, LinksApi.validInstallId(iid) { body["iid"] = iid }
+        _ = try? await call("POST", "/v1/open", json: body)
+    }
+
+    /// The install id shape the service accepts (16 to 64 hex characters); anything else is simply not sent.
+    static func validInstallId(_ iid: String) -> Bool {
+        (16...64).contains(iid.utf8.count) && iid.utf8.allSatisfy { Check.isDigit($0) || (65...70).contains($0) || (97...102).contains($0) }
     }
 
     private static func detail(_ status: Int, _ data: Data) -> String {

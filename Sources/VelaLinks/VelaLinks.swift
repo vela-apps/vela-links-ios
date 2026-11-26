@@ -48,6 +48,8 @@ public final class VelaLinks: @unchecked Sendable {
     var inAppHandler: InAppMessageHandler?
     private var deferredTask: Task<Void, Never>?
     private static let maxQueuedOperations = 100
+    /// Pushes already counted by `trackPushOpen` in this process.
+    static let pushOpens = PushOpenReader()
 
     // MARK: Start
 
@@ -66,11 +68,15 @@ public final class VelaLinks: @unchecked Sendable {
     ///   - appId: the bundle id sent with every signed call; read from the app when `nil`.
     ///   - userDefaults: where the SDK keeps its state; pass your own suite if you share data with extensions.
     ///   - inAppStyle: the colours, corner radius and font of in-app messages.
+    ///   - clipboardMatch: read the clipboard for the token the link page copies. Leave it off (the default): links on iPhone go
+    ///     straight to the App Store, so there is no token and reading would only show iOS's paste notice. Turn it on only if your app
+    ///     has no App Store address in the dashboard.
     /// - Throws: ``VelaLinksError`` with kind `.invalidArgument` for an empty key or an invalid base URL.
     public static func configure(apiKey: String, baseUrl: String, slug: String? = nil, matchDeferred: Bool = true,
                                  reportOpens: Bool = true, trackEvents: Bool = true, autoTrack: Bool = true,
                                  requestTimeout: TimeInterval = 10, appId: String? = nil,
-                                 userDefaults: UserDefaults = .standard, inAppStyle: InAppStyle = InAppStyle()) async throws {
+                                 userDefaults: UserDefaults = .standard, inAppStyle: InAppStyle = InAppStyle(),
+                                 clipboardMatch: Bool = false) async throws {
         var config = Configuration(apiKey: apiKey, baseUrl: baseUrl)
         config.slug = slug
         config.matchDeferred = matchDeferred
@@ -80,6 +86,7 @@ public final class VelaLinks: @unchecked Sendable {
         config.requestTimeout = requestTimeout
         config.appId = appId
         config.inAppStyle = inAppStyle
+        config.clipboardMatch = clipboardMatch
         var deps = Dependencies()
         deps.store = UserDefaultsStorage(userDefaults)
         try await shared.configure(config, deps)
@@ -390,7 +397,7 @@ public final class VelaLinks: @unchecked Sendable {
             emit(link, from: engine)
             if engine.reportOpens {
                 let source = isQRScan(url) ? "qr" : "link"
-                engine.spawn { await engine.api.reportOpen(code: link.code, source: source) }
+                engine.spawn { await engine.api.reportOpen(code: link.code, source: source, iid: engine.tracker.installIdIfTracking) }
             }
             return link
         } catch {

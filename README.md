@@ -15,11 +15,11 @@ and **Verify setup** checks them. Save both the iOS bundle id and the Apple Team
 
 **2. Install.** In Xcode: File > Add Package Dependencies, and enter the repository address of this package. Or in `Package.swift`:
 ```swift
-.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.1.0")
+.package(url: "https://github.com/vela-apps/vela-links-ios.git", from: "1.2.0")
 ```
 CocoaPods:
 ```ruby
-pod 'VelaLinks', :git => 'https://github.com/vela-apps/vela-links-ios.git', :tag => '1.1.0'
+pod 'VelaLinks', :git => 'https://github.com/vela-apps/vela-links-ios.git', :tag => '1.2.0'
 ```
 
 **3. Start it** as early as you can (the app's `init` or `application(_:didFinishLaunchingWithOptions:)`):
@@ -149,19 +149,44 @@ await VelaLinks.shared.resetUser()                           // on sign-out: fir
 VelaLinks.shared.setUserProperties(["lang": "te", "orders": 3, "uses_business": true],
                                    timezone: "Asia/Kolkata", quietStart: 21, quietEnd: 8)
 
-// Firebase:
+// Vela sends pushes through Firebase only: register the FCM token (Messaging.messaging().token, and again from
+// messaging(_:didReceiveRegistrationToken:)). A raw APNs token cannot receive Vela's pushes; passing one logs a warning.
 VelaLinks.shared.registerPushToken(fcmToken)                 // provider defaults to "fcm"
-// plain APNs, from application(_:didRegisterForRemoteNotificationsWithDeviceToken:):
-VelaLinks.shared.registerPushToken(apnsDeviceToken: deviceToken)
 
 VelaLinks.shared.setConsent("push", granted: true, policyVersion: "2026-10")   // returns false for invalid input
 VelaLinks.shared.setConsent("inapp", granted: false, policyVersion: "2026-10", source: "settings_toggle")
 let allowed = VelaLinks.shared.consentOf("push")             // true, false, or nil if never asked
+let start = VelaLinks.shared.offersEnabled("push")           // consentOf("push") ?? offersDefaultOn: where an offers switch starts
+await VelaLinks.shared.refreshConsent()                      // read back on demand (setIdentityToken already does it)
 print(VelaLinks.shared.installId ?? "")                      // register this phone for testing messages in the dashboard
 ```
 Names that sound personal (phone, email, name, address, religion, health ...) and values that look like a phone number or an email are
 dropped before anything is sent; up to 20 properties; `nil` removes one. Channels: `push`, `whatsapp`, `sms`, `email`, `inapp`; purposes:
 `marketing` (default) or `service`. A withdrawal takes effect at once. The push token is collected only if you call `registerPushToken`.
+
+**Consent read-back:** `setIdentityToken(_:)` also asks Vela Links for the person's own answers, so `consentOf` shows what is really
+recorded after a sign-in again or on a new phone. An answer given on this phone and not delivered yet wins, and a reply that arrives after
+the person signed out is dropped. `offersDefaultOn` is your app's "offers on by default" setting from the dashboard (false until read, and
+with a server that does not send it); `offersEnabled(_:)` is `consentOf(channel) ?? offersDefaultOn`.
+
+### Push opens
+Vela's push report counts a tap when the app reports it. `trackPushOpen(_:)` records `push_open` with the campaign id (once per push,
+even if it is handed over twice) and returns the page the push should open (`vela_route`, `vela_params`), or `nil` for a push that is
+not from Vela.
+```swift
+// UNUserNotificationCenterDelegate (it is also called for a tap that launched the app)
+func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                            withCompletionHandler completionHandler: @escaping () -> Void) {
+    let open = VelaLinks.shared.trackPushOpen(response.notification.request.content.userInfo)
+    if let route = open?.route { router.open(route, params: open?.params ?? [:]) }   // check it like any deep link
+    completionHandler()
+}
+```
+"Once per push": a push is known by the `vela_send_id` the service puts in its data; with an older service, by `gcm.message_id` (or the
+`messageId` you pass); with neither, the same campaign opened again within 10 minutes counts once.
+
+With Flutter's `firebase_messaging` or React Native Firebase, use those SDKs' `trackPushOpen` with `getInitialMessage` and
+`onMessageOpenedApp` instead. A tap is credited to the signed-in person, so set the identity as usual.
 
 Shopping events campaigns understand ("added to cart, did not order"):
 ```swift
@@ -261,11 +286,15 @@ launch, and when the app was closed before it could be saved.
 - **One person, many phones:** call `setUserId` after sign-in and `resetUser()` on sign-out. Both first send what is waiting under the
   previous identity (they wait at most 5 seconds). User ids are 1 to 100 visible ASCII characters with no spaces; anything else is
   ignored. Without one, each install is its own anonymous person.
-- **Deferred links and the paste notice:** on the first launch after install the SDK reads the clipboard once per try, looking for
-  the `vlink:` token the link page copied. It asks `hasStrings` first, so a clipboard without text is never read. iOS may show its
-  "pasted from" notice, and from iOS 16 a system question "Allow Paste" when the text was copied in another app (the SDK reads
-  it away from the main thread, so your UI keeps running while the question is open). If the person taps "Don't Allow Paste", no
-  token is sent and the service can still match by network fingerprint. It makes at most 3 tries and stops after the first success.
+- **Deferred links, no paste notice:** since 1.2.0 the SDK does not read the clipboard. Links on iPhone go straight to the App Store
+  (no token is copied), and the first launch is matched by the service from a one-way hash of the network address, helped by the
+  screen size in points (`screen_width`, `screen_height`), `pixel_ratio`, time zone (`timezone`), language (`language`) and iOS
+  version (`os_version`) the SDK sends with the check, together with the random install id (`iid`, also sent with link-open reports; only while tracking is on, never
+  with `trackEvents: false` or after `setTrackingEnabled(false)`).
+  Only an app with no App Store address in the dashboard still gets a link page that copies a `vlink:` token; such an app can pass
+  `configure(..., clipboardMatch: true)` to read it (it asks `hasStrings` first, reads away from the main thread, and iOS shows its
+  paste notice or "Allow Paste" question). It makes at most 3 tries and stops after the first success. A matched link carries
+  `clickId` and `utm` when the service sends them (newer servers).
 - **Adding the SDK to an app that is already installed:** the first-launch check also runs once for people who update. Pass
   `matchDeferred: false` in that release and turn it on in the next one. `first_open` cannot tell an existing install from a new
   one: anyone who updates to the first release that contains the SDK (or from an older SDK version that had not yet reported it)
@@ -293,10 +322,12 @@ launch, and when the app was closed before it could be saved.
 - With people data, only if your app calls it: the facts you give (plain labels, numbers, yes/no), the phone's language and optional time zone and
   quiet hours, the push token, the person's consent answers, and the signed identity token your server made. With in-app messages: the install
   id, the screen or event name, the language and the message id and what the person did with it (shown, tapped, closed, video progress).
-- First launch after install: the clipboard is read once per try, only to look for a Vela Links token (`vlink:` and letters or digits).
-  Any other clipboard text is ignored and never sent. If there is no token, the service can still match the install to a recent tap
-  using a one-way hash of the network address (it never stores the address itself). The token is removed from the clipboard once
-  used, but only if nothing was copied since.
+- First launch after install: the screen size in points and pixel ratio, the time zone, the phone's language, the iOS version and the
+  random install id, so the service can
+  match the install to a recent tap using a one-way hash of the network address (it never stores the address itself). The clipboard is
+  not read, unless you pass `clipboardMatch: true`: then it is read once per try, only to look for a Vela Links token (`vlink:` and
+  letters or digits); any other clipboard text is ignored and never sent, and the token is removed once used, but only if nothing was
+  copied since.
 
 **Stored on the phone** (`UserDefaults`, keys starting `vela_links.`): the random install id (made and stored on the first launch,
 before any consent and even when tracking is off, but sent only once tracking is on); the events not yet sent (names and

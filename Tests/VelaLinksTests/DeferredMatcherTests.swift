@@ -11,7 +11,7 @@ final class DeferredMatcherTests: XCTestCase {
     }
 
     private func matcher(_ source: FakeInstallSource) throws -> DeferredMatcher {
-        DeferredMatcher(api: try makeApi(), store: store, source: source)
+        DeferredMatcher(api: try makeApi(), store: store, source: source, readClipboard: true, signals: { [:] })
     }
 
     func testOnlyTextThatLooksLikeOurClipboardTokenIsUsed() {

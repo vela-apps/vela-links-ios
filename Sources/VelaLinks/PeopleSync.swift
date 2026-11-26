@@ -39,6 +39,11 @@ final class PeopleSync: @unchecked Sendable {
     private var stopped = false
     private var timer: DispatchWorkItem?
     private var running: Task<Void, Never>?
+    // Guards for a read-back that arrives late: `epoch` changes when the person changes (reset), and `changedAt` notes when each
+    // answer was last chosen on this phone, so an older read can never undo a newer choice or reach the next person.
+    private var epoch = 0
+    private var version = 0
+    private var changedAt: [String: Int] = [:]
 
     init(api: LinksApi, store: VelaLinksStorage, sources: Sources, options: Options = Options()) {
         self.api = api
@@ -114,6 +119,8 @@ final class PeopleSync: @unchecked Sendable {
         let on = sources.enabled()
         lock.sync {
             state.answers["\(channel)/\(purpose)"] = granted
+            version += 1
+            changedAt["\(channel)/\(purpose)"] = version
             if on {
                 state.consents.removeAll { $0.channel == channel && $0.purpose == purpose }
                 state.consents.append(ConsentAnswer(channel: channel, purpose: purpose, granted: granted,
@@ -128,8 +135,45 @@ final class PeopleSync: @unchecked Sendable {
         return true
     }
 
-    /// What the person last chose for `channel` on this phone, or `nil` if they were never asked.
+    /// What the person last chose for `channel` (read back from the service, or chosen on this phone), or `nil` if never asked.
     func consentOf(_ channel: String, purpose: String) -> Bool? { lock.sync { state.answers["\(channel)/\(purpose)"] } }
+
+    /// Whether the app treats offers as on for a person who was never asked, as last read by `refreshConsent()` (false until then).
+    var offersDefaultOn: Bool { lock.sync { state.offersDefaultOn } }
+
+    /// Reads the signed-in person's own answers back from the service, so a sign-in again or a new phone shows what is really
+    /// recorded. An answer given on this phone and not delivered yet (or chosen while the read was on its way) wins over the
+    /// service's. `true` when the service answered. Never throws.
+    func refreshConsent() async -> Bool {
+        guard sources.enabled(), let body = envelope(), let token = body["identity_token"] as? String else { return false }
+        let (startEpoch, since): (Int, Int) = lock.sync { (epoch, version) }
+        guard let answer = await api.postForObject("/v1/users/consent/state", body),
+              let consent = answer["consent"] as? [String: Any] else { return false }
+        var next: [String: Bool] = [:]
+        for (channel, value) in consent {
+            guard PeopleRules.consentChannels.contains(channel), let purposes = value as? [String: Any] else { continue }
+            for (purpose, granted) in purposes where PeopleRules.consentPurposes.contains(purpose) {
+                // JSON true/false only (an NSNumber 0/1 is not an answer)
+                if let flag = granted as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() {
+                    next["\(channel)/\(purpose)"] = flag.boolValue
+                }
+            }
+        }
+        // the app's own setting, not the person's: a server that does not send it means off
+        let defaultOn = (answer["offers_default_on"] as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() && $0.boolValue } ?? false
+        return lock.sync {
+            // signed out, or someone else signed in, while waiting: this answer belongs to the earlier person
+            guard startEpoch == epoch, sources.identity() == token else { return false }
+            for (key, at) in changedAt where at > since {
+                if let mine = state.answers[key] { next[key] = mine }
+            }
+            for c in state.consents { next["\(c.channel)/\(c.purpose)"] = c.granted }
+            state.answers = next
+            state.offersDefaultOn = defaultOn
+            saveLocked()
+            return true
+        }
+    }
 
     /// Tracking was switched off: nothing waiting is sent, and it is forgotten.
     func discard() {
@@ -161,6 +205,8 @@ final class PeopleSync: @unchecked Sendable {
             state.sent = [:]
             state.sentPush = nil
             state.answers = [:]
+            epoch += 1
+            changedAt = [:]
             saveLocked()
         }
     }

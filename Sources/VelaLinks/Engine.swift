@@ -26,6 +26,8 @@ struct Configuration {
     var requestTimeout: TimeInterval = 10
     var appId: String?
     var inAppStyle = InAppStyle()
+    /// Read the clipboard for a `vlink:` token on the first launch (only for an app with no App Store address).
+    var clipboardMatch = false
 }
 
 /// Replaceable parts, for tests.
@@ -33,6 +35,7 @@ struct Dependencies {
     var fetcher: HTTPFetcher?
     var store: VelaLinksStorage?
     var installSource: InstallSource?
+    var matchSignals: (@Sendable () async -> [String: Any])?
     var now: () -> Date = { Date() }
     var notificationCenter: NotificationCenter = .default
     var observeLifecycle = true
@@ -91,9 +94,12 @@ final class Engine: @unchecked Sendable {
         options.enabled = config.trackEvents
         options.flushEvery = deps.flushEvery
         options.flushAt = deps.flushAt
-        tracker = EventTracker(api: api, store: store, platform: "ios", appVersion: deps.appVersion, now: deps.now,
-                               options: options, backgroundTasks: deps.backgroundTasks)
-        matcher = DeferredMatcher(api: api, store: store, source: deps.installSource ?? ClipboardInstallSource())
+        let events = EventTracker(api: api, store: store, platform: "ios", appVersion: deps.appVersion, now: deps.now,
+                                  options: options, backgroundTasks: deps.backgroundTasks)
+        tracker = events
+        matcher = DeferredMatcher(api: api, store: store, source: deps.installSource ?? ClipboardInstallSource(),
+                                  readClipboard: config.clipboardMatch, signals: deps.matchSignals ?? DeviceSignals.read,
+                                  installId: { events.installIdIfTracking })
         let tracker = self.tracker
         let enabled: () -> Bool = { tracker.isEnabled }
         people = PeopleSync(api: api, store: store, sources: PeopleSync.Sources(

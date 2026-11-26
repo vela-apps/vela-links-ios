@@ -113,6 +113,9 @@ final class EventTracker: @unchecked Sendable {
     /// This install's random id (`nil` until `start()` has loaded or made it).
     var installId: String? { locked { iid } }
 
+    /// This install's id while tracking is on, else `nil`: what may go with a link open or the first-launch match.
+    var installIdIfTracking: String? { locked { enabled ? iid : nil } }
+
     /// The app's version label, cleaned (`nil` until `start()`).
     var appVersion: String? { locked { version } }
 
